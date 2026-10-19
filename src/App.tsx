@@ -1,11 +1,12 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useState } from 'react'
 import { exercises, grammar, Vocabulary, vocabulary } from './data'
 
-type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'analytics' | 'notebook'
+type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'analytics' | 'notebook'
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type DeckLevel = 1 | 2 | 3 | 4
 type Review = { dueAt: number; intervalHours: number; repetitions: number; lapses: number; lastRating: Rating; lastReviewedAt: number }
 type Mistake = { exerciseId: string; answer: string; occurredAt: number; count: number }
+type TypingAttempt = { wordId: string; deckLevel: DeckLevel; answer: string; correct: boolean; elapsedMs: number; completedAt: number }
 type Activity = Record<string, { cards: number; exercises: number; minutes: number }>
 type LearningState = {
   level: string
@@ -20,6 +21,7 @@ type LearningState = {
   activity: Activity
   completedGrammar: string[]
   completedExercises: string[]
+  typingAttempts: TypingAttempt[]
 }
 type AuthUser = { id: number; email: string; name: string | null }
 
@@ -38,7 +40,7 @@ const deckOptions: Array<{ level: DeckLevel; label: string }> = [
 ]
 const defaultState: LearningState = {
   level: 'HSK 4', deckLevel: 4, theme: 'light', goal: 15, onboarded: false, reviews: {}, favorites: [], difficult: [],
-  mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [],
+  mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], typingAttempts: [],
 }
 
 function accountStorageKey(userId: number) {
@@ -105,6 +107,7 @@ const nav: Array<{ id: View; label: string; icon: string }> = [
   { id: 'grammar', label: 'Ngữ pháp', icon: '⌘' },
   { id: 'exercises', label: 'Bài tập', icon: '✓' },
   { id: 'review', label: 'Ôn tập', icon: '↻' },
+  { id: 'typing', label: 'Luyện gõ', icon: '⌨' },
   { id: 'analytics', label: 'Thống kê', icon: '▥' },
 ]
 
@@ -237,6 +240,7 @@ export default function App() {
         {view === 'grammar' && <GrammarPage state={state} update={update} />}
         {view === 'exercises' && <ExercisePage state={state} update={update} addActivity={addActivity} />}
         {view === 'review' && <ReviewPage key={state.deckLevel} words={reviewWords} deckLevel={state.deckLevel} setDeckLevel={setDeckLevel} rate={rate} difficult={state.difficult} toggleDifficult={toggleDifficult} />}
+        {view === 'typing' && <TypingPracticePage key={state.deckLevel} words={deckWords} deckLevel={state.deckLevel} update={update} />}
         {view === 'analytics' && <AnalyticsPage state={state} learned={reviewedIds.length} mastered={mastered} />}
         {view === 'notebook' && <Notebook state={state} setView={setView} />}
       </main>
@@ -346,7 +350,7 @@ function Overview({ reviewed, mastered, due, activity, state, deckLevel, deckTot
 }
 
 function PlanCard({ icon, value, text, tone, onClick }: { icon: string; value: string; text: string; tone: string; onClick: () => void }) { return <button className={`plan-card ${tone}`} onClick={onClick}><i>{icon}</i><strong>{value}</strong><span>{text}</span><b>→</b></button> }
-function Stat({ label, value }: { label: string; value: number }) { return <div className="stat"><strong>{value}</strong><span>{label}</span></div> }
+function Stat({ label, value }: { label: string; value: number | string }) { return <div className="stat"><strong>{value}</strong><span>{label}</span></div> }
 
 function VocabularyPage({ state, toggleFavorite, toggleDifficult }: Pick<{ state: LearningState; toggleFavorite: (id: string) => void; toggleDifficult: (id: string) => void }, 'state' | 'toggleFavorite' | 'toggleDifficult'>) {
   const [query, setQuery] = useState('')
@@ -442,6 +446,99 @@ function ReviewPage({ words, deckLevel, setDeckLevel, rate, difficult, toggleDif
 
 function RatingButton({ value, shortcut, label, time, onClick }: { value: Rating; shortcut: string; label: string; time: string; onClick: () => void }) { return <button className={`rating ${value}`} onClick={onClick}><kbd>{shortcut}</kbd><strong>{label}</strong><small>{time}</small></button> }
 
+function normalizePinyinAnswer(value: string) {
+  return value
+    .trim()
+    .toLocaleLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/v/g, 'u')
+    .replace(/[0-9\s'’\-·]/g, '')
+}
+
+function formatTypingTime(milliseconds: number) {
+  const seconds = Math.max(0, milliseconds) / 1000
+  return seconds < 60 ? `${seconds.toFixed(seconds < 10 ? 1 : 0)} giây` : `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
+}
+
+function shuffleWords(words: Vocabulary[]) {
+  const shuffled = [...words]
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const replacement = Math.floor(Math.random() * (index + 1))
+    ;[shuffled[index], shuffled[replacement]] = [shuffled[replacement], shuffled[index]]
+  }
+  return shuffled
+}
+
+function TypingPracticePage({ words, deckLevel, update }: { words: Vocabulary[]; deckLevel: DeckLevel; update: (recipe: (state: LearningState) => LearningState) => void }) {
+  const [durationSeconds, setDurationSeconds] = useState(60)
+  const [stage, setStage] = useState<'ready' | 'running' | 'summary'>('ready')
+  const [queue, setQueue] = useState<Vocabulary[]>([])
+  const [position, setPosition] = useState(0)
+  const [answer, setAnswer] = useState('')
+  const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null)
+  const [roundStartedAt, setRoundStartedAt] = useState<number | null>(null)
+  const [now, setNow] = useState(Date.now())
+  const [feedback, setFeedback] = useState<TypingAttempt | null>(null)
+  const [attempts, setAttempts] = useState<TypingAttempt[]>([])
+  const word = queue[position] ?? words[0]
+  const elapsedSession = sessionStartedAt ? now - sessionStartedAt : 0
+  const remaining = Math.max(0, durationSeconds * 1000 - elapsedSession)
+  const correctCount = attempts.filter((attempt) => attempt.correct).length
+  const averageMs = attempts.length ? Math.round(attempts.reduce((total, attempt) => total + attempt.elapsedMs, 0) / attempts.length) : 0
+  const syllablesPerMinute = attempts.length ? Math.round(correctCount / Math.max(1 / 60, attempts.reduce((total, attempt) => total + attempt.elapsedMs, 0) / 60_000)) : 0
+
+  useEffect(() => {
+    if (stage !== 'running' || !sessionStartedAt) return
+    const timer = window.setInterval(() => setNow(Date.now()), 100)
+    return () => window.clearInterval(timer)
+  }, [stage, sessionStartedAt])
+
+  useEffect(() => {
+    if (stage === 'running' && sessionStartedAt && remaining <= 0) setStage('summary')
+  }, [remaining, sessionStartedAt, stage])
+
+  const startSession = () => {
+    setQueue(shuffleWords(words)); setPosition(0); setAnswer(''); setFeedback(null); setAttempts([])
+    setSessionStartedAt(null); setRoundStartedAt(null); setNow(Date.now()); setStage('running')
+  }
+
+  const beginTyping = (value: string) => {
+    if (!sessionStartedAt) { const startedAt = Date.now(); setSessionStartedAt(startedAt); setRoundStartedAt(startedAt); setNow(startedAt) }
+    setAnswer(value)
+  }
+
+  const nextWord = () => {
+    const nextPosition = position + 1
+    if (nextPosition >= queue.length) { setQueue(shuffleWords(words)); setPosition(0) } else setPosition(nextPosition)
+    setAnswer(''); setFeedback(null); setRoundStartedAt(null)
+  }
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (feedback) { nextWord(); return }
+    if (!answer.trim() || !word) return
+    const completedAt = Date.now()
+    const attempt: TypingAttempt = {
+      wordId: word.id, deckLevel, answer, correct: normalizePinyinAnswer(answer) === normalizePinyinAnswer(word.pinyin),
+      elapsedMs: roundStartedAt ? completedAt - roundStartedAt : 0, completedAt,
+    }
+    setFeedback(attempt)
+    setAttempts((previous) => [...previous, attempt])
+    update((previous) => ({ ...previous, typingAttempts: [...previous.typingAttempts, attempt].slice(-500) }))
+  }
+
+  if (stage === 'ready') return <section className="page typing-page"><div className="page-heading"><div><p className="eyebrow">Tốc độ · Pinyin</p><h1>Luyện gõ Pinyin</h1><p className="muted">Gõ pinyin cho Hán tự hoặc cụm từ. Đồng hồ của từng từ bắt đầu ở ký tự đầu tiên bạn nhập.</p></div><span className="coverage">HSK {deckLevel} · {words.length} từ</span></div><section className="typing-setup"><span className="typing-mark">⌨</span><h2>Chọn thời lượng phiên</h2><p>Bạn có thể gõ có dấu, không dấu hoặc dùng số thanh như <b>ni3 hao3</b>.</p><div className="duration-options">{[60, 180, 600].map((seconds) => <button key={seconds} className={durationSeconds === seconds ? 'selected' : ''} onClick={() => setDurationSeconds(seconds)}>{seconds < 60 ? `${seconds} giây` : `${seconds / 60} phút`}</button>)}</div><button className="primary typing-start" onClick={startSession}>Bắt đầu luyện <span>→</span></button><small>Enter để chấm và chuyển sang từ tiếp theo.</small></section></section>
+
+  if (stage === 'summary') {
+    const incorrect = attempts.filter((attempt) => !attempt.correct).slice(-5)
+    return <section className="page typing-page"><div className="typing-summary"><div className="celebration">⌨</div><p className="eyebrow">Hoàn thành phiên luyện gõ</p><h1>Nhịp gõ của bạn</h1><div className="summary-grid"><Stat label="Đúng" value={correctCount} /><Stat label="Độ chính xác" value={attempts.length ? `${Math.round((correctCount / attempts.length) * 100)}%` : '—'} /><Stat label="TB mỗi từ" value={attempts.length ? formatTypingTime(averageMs) : '—'} /><Stat label="Từ đúng/phút" value={syllablesPerMinute} /></div>{incorrect.length > 0 && <div className="typing-mistakes"><b>Cần gõ lại</b>{incorrect.map((attempt) => { const typedWord = words.find((item) => item.id === attempt.wordId); return <p key={attempt.completedAt}><span>{typedWord?.hanzi}</span> {typedWord?.pinyin}</p> })}</div>}<button className="primary" onClick={startSession}>Luyện lại <span>→</span></button><button className="text-button" onClick={() => setStage('ready')}>Đổi thời lượng</button></div></section>
+  }
+
+  const roundTime = feedback?.elapsedMs ?? (roundStartedAt ? now - roundStartedAt : 0)
+  return <section className="page typing-page"><div className="review-heading"><div><p className="eyebrow">Luyện gõ · HSK {deckLevel}</p><h1>Pinyin tốc độ</h1></div><span>{sessionStartedAt ? formatTypingTime(remaining) : 'Bắt đầu khi bạn gõ'}</span></div><div className="typing-session-meta"><span>{attempts.length} lượt · {correctCount} đúng</span><span>Thời gian từ: {roundStartedAt ? formatTypingTime(roundTime) : '—'}</span></div><section className="typing-card"><p className="typing-instruction">Gõ pinyin cho từ này</p><p className="typing-hanzi">{word?.hanzi}</p><form onSubmit={submit}><input autoFocus value={answer} onChange={(event) => beginTyping(event.currentTarget.value)} disabled={!!feedback} placeholder="Ví dụ: ni hao hoặc ni3 hao3" autoComplete="off" autoCapitalize="none" spellCheck={false} /><button className="primary" type="submit" disabled={!answer.trim()}>{feedback ? 'Từ tiếp theo →' : 'Kiểm tra ↵'}</button></form>{feedback && <div className={`typing-feedback ${feedback.correct ? 'correct' : 'incorrect'}`}><b>{feedback.correct ? '✓ Chính xác' : '× Chưa đúng'}</b><p><span>{word?.pinyin}</span> · {word?.meaning}</p><small>{formatTypingTime(feedback.elapsedMs)}</small></div>}<p className="typing-hint">Dấu thanh không bắt buộc; khoảng trắng giữa các âm tiết là tùy chọn.</p></section></section>
+}
+
 function AnalyticsPage({ state, learned, mastered }: { state: LearningState; learned: number; mastered: number }) {
   const days = Array.from({ length: 7 }, (_, index) => { const day = new Date(); day.setDate(day.getDate() - (6 - index)); return day })
   const totalMinutes = Object.values(state.activity).reduce((total, entry) => total + entry.minutes, 0)
@@ -459,4 +556,4 @@ function Onboarding({ state, update }: { state: LearningState; update: (recipe: 
 
 function SearchDialog({ value, setValue, close, setView }: { value: string; setValue: (value: string) => void; close: () => void; setView: (view: View) => void }) { const matching = vocabulary.filter((word) => normalized(`${word.hanzi} ${word.pinyin} ${word.meaning}`).includes(normalized(value))).slice(0, 5); return <div className="modal-layer search-layer" onMouseDown={close}><section className="search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="field-with-icon"><span>⌕</span><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => event.key === 'Escape' && close()} placeholder="Tìm Hán tự, pinyin, nghĩa…" /><kbd>Esc</kbd></div>{value ? <div className="search-results">{matching.length ? matching.map((word) => <button key={word.id} onClick={() => { setView('vocabulary'); close() }}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin}</small></span></button>) : <p>Không tìm thấy kết quả.</p>}</div> : <div className="search-hint"><p>Tìm nhanh từ vựng, ngữ pháp và bài học.</p><button onClick={() => { setView('grammar'); close() }}>⌘ Xem ngữ pháp</button><button onClick={() => { setView('review'); close() }}>↻ Mở ôn tập</button></div>}</section></div> }
 
-function MobileNavigation({ view, setView }: { view: View; setView: (view: View) => void }) { return <nav className="mobile-nav" aria-label="Điều hướng di động">{nav.slice(0, 5).map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
+function MobileNavigation({ view, setView }: { view: View; setView: (view: View) => void }) { const mobileNav = nav.filter((item) => ['overview', 'vocabulary', 'typing', 'review', 'analytics'].includes(item.id)); return <nav className="mobile-nav" aria-label="Điều hướng di động">{mobileNav.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
