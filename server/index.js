@@ -4,9 +4,12 @@ import cookieParser from 'cookie-parser'
 import cors from 'cors'
 import express from 'express'
 import jwt from 'jsonwebtoken'
+import path from 'node:path'
 import pg from 'pg'
+import { fileURLToPath } from 'node:url'
 
 const { Pool } = pg
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const port = Number(process.env.PORT ?? 3001)
 const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://127.0.0.1:4173'
 const isProduction = process.env.NODE_ENV === 'production'
@@ -133,6 +136,14 @@ app.put('/api/learning-state', requireUser, async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
+app.use('/api', (_req, res) => res.status(404).json({ error: 'Không tìm thấy API.' }))
+
+if (isProduction) {
+  const clientBuild = path.join(projectRoot, 'dist')
+  app.use(express.static(clientBuild))
+  app.get('/{*splat}', (_req, res) => res.sendFile(path.join(clientBuild, 'index.html')))
+}
+
 app.use((error, _req, res, _next) => {
   console.error(error)
   res.status(500).json({ error: 'Máy chủ gặp lỗi. Vui lòng thử lại.' })
@@ -153,7 +164,7 @@ async function start() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `)
-  app.listen(port, () => console.log(`HANZI API listening on http://127.0.0.1:${port}`))
+  app.listen(port, '0.0.0.0', () => console.log(`HANZI running on port ${port}`))
 }
 
 start().catch((error) => { console.error('Could not start API:', error); process.exit(1) })
