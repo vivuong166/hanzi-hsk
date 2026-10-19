@@ -309,7 +309,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => 
       <label>Mật khẩu<input value={password} onChange={(event) => setPassword(event.currentTarget.value)} type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={8} required /></label>
       {mode === 'register' && <small>Mật khẩu cần ít nhất 8 ký tự.</small>}
       {error && <p className="auth-error" role="alert">{error}</p>}
-      <button className="primary wide" disabled={submitting}>{submitting ? 'Đang xử lý…' : mode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}</button>
+      <button className="primary wide auth-submit" disabled={submitting}>{submitting ? 'Đang xử lý…' : mode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}</button>
     </form>
     <p className="auth-switch">{mode === 'login' ? 'Chưa có tài khoản?' : 'Đã có tài khoản?'} <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError('') }}>{mode === 'login' ? 'Đăng ký' : 'Đăng nhập'}</button></p>
   </section></main>
