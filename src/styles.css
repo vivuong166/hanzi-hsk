@@ -45,6 +45,7 @@ body { margin: 0; min-width: 320px; background: #fafaf8; }
 .catalogue-note p { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0 0; }
 .card-catalogue-note { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 26px 0 0; }
 .card-source { color: var(--muted); font-size: 11px; margin: 18px 0 0 !important; }
+.card-sentence-audio { margin-top: 11px; border: 1px solid var(--border); background: var(--surface-soft); color: var(--accent); border-radius: 20px; padding: 6px 10px; font-size: 12px; font-weight: 700; }.card-sentence-audio:hover { border-color: var(--accent); background: var(--accent-soft); }
 .deck-picker { display: flex; flex-wrap: wrap; gap: 7px; margin: 16px 0 4px; }
 .deck-picker button { border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 20px; padding: 7px 10px; font-size: 12px; }
 .deck-picker button:hover, .deck-picker button.selected { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); font-weight: 700; }
