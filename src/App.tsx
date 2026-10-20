@@ -21,6 +21,7 @@ type LearningState = {
   activity: Activity
   completedGrammar: string[]
   completedExercises: string[]
+  exerciseCursor: number
   typingAttempts: TypingAttempt[]
 }
 type AuthUser = { id: number; email: string; name: string | null; role: 'learner' | 'admin' }
@@ -49,9 +50,12 @@ const deckOptions: Array<{ level: DeckLevel; label: string }> = [
   { level: 4, label: 'HSK 4 · 600 từ' },
 ]
 const hsk4ExerciseWords = vocabulary.filter((word) => (word.sourceIndex ?? 0) >= 601 && (word.sourceIndex ?? 0) <= 1200)
+const grammarExerciseInterval = 10
+const hsk4VocabularyQuestionCount = hsk4ExerciseWords.length * 3
+const hsk4CurriculumLength = hsk4VocabularyQuestionCount + Math.floor(hsk4VocabularyQuestionCount / (grammarExerciseInterval - 1))
 const defaultState: LearningState = {
   level: 'HSK 4', deckLevel: 4, theme: 'light', goal: 15, onboarded: false, reviews: {}, favorites: [], difficult: [],
-  mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], typingAttempts: [],
+  mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], exerciseCursor: 0, typingAttempts: [],
 }
 
 function accountStorageKey(userId: number) {
@@ -431,10 +435,10 @@ function exerciseOptions(wordIndex: number, answer: string, value: (word: Vocabu
 }
 
 function exerciseForAttempt(attempt: number): Exercise {
-  // Every sixth prompt revisits the curated grammar exercises; the other prompts
-  // rotate through all 600 HSK 4 words and three question forms indefinitely.
-  if ((attempt + 1) % 6 === 0) return exercises[Math.floor(attempt / 6) % exercises.length]
-  const vocabularyAttempt = attempt - Math.floor((attempt + 1) / 6)
+  // Every tenth prompt revisits the curated grammar exercises; the other prompts
+  // cover all 600 HSK 4 words in three question forms before the course ends.
+  if ((attempt + 1) % grammarExerciseInterval === 0) return exercises[Math.floor(attempt / grammarExerciseInterval) % exercises.length]
+  const vocabularyAttempt = attempt - Math.floor((attempt + 1) / grammarExerciseInterval)
   const wordIndex = vocabularyAttempt % hsk4ExerciseWords.length
   const variation = Math.floor(vocabularyAttempt / hsk4ExerciseWords.length) % 3
   const word = hsk4ExerciseWords[wordIndex]
@@ -454,10 +458,18 @@ function exerciseForAttempt(attempt: number): Exercise {
   }
 }
 
+function restoreExerciseCursor(state: LearningState) {
+  if (state.exerciseCursor > 0) return Math.min(state.exerciseCursor, hsk4CurriculumLength)
+  let cursor = 0
+  while (cursor < hsk4CurriculumLength && state.completedExercises.includes(exerciseForAttempt(cursor).id)) cursor += 1
+  return cursor
+}
+
 function ExercisePage({ state, update, addActivity }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void; addActivity: (kind: 'cards' | 'exercises', minutes?: number) => void }) {
-  const [index, setIndex] = useState(0); const [answer, setAnswer] = useState<string | string[]>(''); const [result, setResult] = useState<boolean | null>(null)
-  const exercise = exerciseForAttempt(index)
-  const progress = ((index % 10) + 1) * 10
+  const [index, setIndex] = useState(() => restoreExerciseCursor(state)); const [answer, setAnswer] = useState<string | string[]>(''); const [result, setResult] = useState<boolean | null>(null)
+  const complete = index >= hsk4CurriculumLength
+  const exercise = complete ? exercises[0] : exerciseForAttempt(index)
+  const progress = Math.round((Math.min(index, hsk4CurriculumLength) / hsk4CurriculumLength) * 100)
   const check = () => {
     const correct = Array.isArray(exercise.answer) ? Array.isArray(answer) && answer.join('|') === exercise.answer.join('|') : answer === exercise.answer
     setResult(correct); addActivity('exercises')
@@ -468,10 +480,15 @@ function ExercisePage({ state, update, addActivity }: { state: LearningState; up
       return { ...previous, completedExercises: completed, mistakes: { ...previous.mistakes, [exercise.id]: { exerciseId: exercise.id, answer: Array.isArray(answer) ? answer.join(' ') : answer || 'Chưa trả lời', occurredAt: Date.now(), count: (old?.count ?? 0) + 1, prompt: exercise.prompt, tags: exercise.tags, correctAnswer: Array.isArray(exercise.answer) ? exercise.answer.join(' ') : exercise.answer, explanation: exercise.explanation } } }
     })
   }
-  const next = () => { setIndex((value) => value + 1); setAnswer(''); setResult(null) }
+  const next = () => {
+    const nextIndex = Math.min(index + 1, hsk4CurriculumLength)
+    setIndex(nextIndex); setAnswer(''); setResult(null)
+    update((previous) => ({ ...previous, exerciseCursor: nextIndex }))
+  }
   const order = Array.isArray(answer) ? answer : []
   const remaining = exercise.type === 'order' ? (exercise.options ?? []).filter((word, i) => !order.some((picked, position) => picked === word && order.indexOf(picked) === position && position <= i)) : []
-  return <section className="page exercise-page"><div className="page-heading"><div><p className="eyebrow">Luyện tập HSK 4 · Lượt {index + 1}</p><h1>Bài tập không giới hạn</h1><p className="muted">1.800 câu từ vựng HSK 4, xen kẽ bài ngữ pháp và tiếp tục tạo lượt mới khi bạn học.</p></div><span className="coverage">{state.completedExercises.length} câu riêng biệt đã làm</span></div>
+  if (complete) return <section className="page exercise-page"><div className="session-summary"><div className="celebration">✓</div><p className="eyebrow">Hoàn thành lộ trình HSK 4</p><h1>Bạn đã đi hết 2.000 lượt</h1><p>Bạn có thể mở <b>Sổ tay lỗi sai</b> để ôn các câu cần cải thiện, hoặc làm lại toàn bộ lộ trình theo nhịp mới.</p><div className="summary-grid"><Stat label="Lượt đã làm" value={hsk4CurriculumLength} /><Stat label="Câu riêng biệt" value={state.completedExercises.length} /><Stat label="Câu cần ôn" value={Object.keys(state.mistakes).length} /></div><button className="primary" onClick={() => { setIndex(0); update((previous) => ({ ...previous, exerciseCursor: 0 })) }}>Làm lại lộ trình <span>→</span></button></div></section>
+  return <section className="page exercise-page"><div className="page-heading"><div><p className="eyebrow">Lộ trình HSK 4 · Câu {index + 1}/{hsk4CurriculumLength}</p><h1>Bài tập HSK 4</h1><p className="muted">Tiến độ được lưu theo tài khoản. Cứ 9 câu từ vựng sẽ có 1 câu ngữ pháp để đổi nhịp.</p></div><span className="coverage">{state.completedExercises.length} câu riêng biệt đã làm</span></div>
     <div className="exercise-shell"><div className="exercise-progress"><i style={{ width: `${progress}%` }} /></div><p className="exercise-type">{exercise.type === 'order' ? 'Sắp xếp câu' : exercise.type === 'fill' ? 'Điền vào chỗ trống' : 'Chọn đáp án'}</p><h2>{exercise.title}</h2><p className="exercise-prompt">{exercise.prompt}</p>
       {exercise.type === 'order' ? <div className="order-area"><div className="answer-line">{order.length ? order.map((word, wordIndex) => <button key={`${word}-${wordIndex}`} onClick={() => result === null && setAnswer(order.filter((_, i) => i !== wordIndex))}>{word}</button>) : <span>Chạm vào từ để xếp câu</span>}</div><div className="word-bank">{remaining.map((word, wordIndex) => <button key={`${word}-${wordIndex}`} disabled={result !== null} onClick={() => setAnswer([...order, word])}>{word}</button>)}</div><button className="text-button" onClick={() => { setAnswer([]); setResult(null) }}>Đặt lại</button></div> : <div className="answer-options">{exercise.options?.map((option) => <button key={option} disabled={result !== null} className={answer === option ? 'chosen' : ''} onClick={() => setAnswer(option)}>{option}</button>)}</div>}
       {result !== null && <div className={`feedback ${result ? 'correct' : 'incorrect'}`}><b>{result ? '✓ Chính xác' : '× Chưa đúng'}</b><p>{exercise.explanation}</p>{!result && <p><strong>Đáp án:</strong> {Array.isArray(exercise.answer) ? exercise.answer.join(' ') : exercise.answer}</p>}</div>}
