@@ -1,7 +1,7 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useState } from 'react'
 import { exercises, grammar, Vocabulary, vocabulary } from './data'
 
-type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'analytics' | 'notebook'
+type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'analytics' | 'notebook' | 'admin'
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type DeckLevel = 1 | 2 | 3 | 4
 type Review = { dueAt: number; intervalHours: number; repetitions: number; lapses: number; lastRating: Rating; lastReviewedAt: number }
@@ -23,7 +23,17 @@ type LearningState = {
   completedExercises: string[]
   typingAttempts: TypingAttempt[]
 }
-type AuthUser = { id: number; email: string; name: string | null }
+type AuthUser = { id: number; email: string; name: string | null; role: 'learner' | 'admin' }
+type ActivityEntry = {
+  id: number
+  action: 'account_registered' | 'login' | 'logout' | 'page_view'
+  metadata: { page?: string }
+  created_at: string
+  user_id: number
+  email: string
+  name: string | null
+  role: string
+}
 
 const storageKey = 'hanzi.learning-state.v1'
 const deckRanges: Record<DeckLevel, { from: number; to: number }> = {
@@ -110,6 +120,7 @@ const nav: Array<{ id: View; label: string; icon: string }> = [
   { id: 'typing', label: 'Luyện gõ', icon: '⌨' },
   { id: 'analytics', label: 'Thống kê', icon: '▥' },
 ]
+const adminNav: { id: View; label: string; icon: string } = { id: 'admin', label: 'Quản trị', icon: '◈' }
 
 export default function App() {
   const [state, setState] = useState<LearningState>(defaultState)
@@ -138,6 +149,12 @@ export default function App() {
     if (!user || checkingSession) return
     localStorage.setItem(accountStorageKey(user.id), JSON.stringify(state))
   }, [state, user, checkingSession])
+  useEffect(() => {
+    if (!user || checkingSession || (view === 'admin' && user.role !== 'admin')) return
+    fetch('/api/activity/page-view', {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: view }),
+    }).catch(() => undefined)
+  }, [view, user, checkingSession])
   useEffect(() => {
     let current = true
     const restoreSession = async () => {
@@ -232,7 +249,7 @@ export default function App() {
 
   return (
     <div className={`app ${state.theme === 'dark' ? 'dark' : ''}`}>
-      <Sidebar state={state} view={view} setView={setView} setTheme={setTheme} openSearch={() => setCommandOpen(true)} />
+      <Sidebar state={state} view={view} setView={setView} setTheme={setTheme} openSearch={() => setCommandOpen(true)} user={user} />
       <main className="main">
         <Topbar due={due.length} openSearch={() => setCommandOpen(true)} user={user} deckLevel={state.deckLevel} setDeckLevel={setDeckLevel} logout={logout} />
         {view === 'overview' && <Overview reviewed={deckWords.filter((word) => state.reviews[word.id]).length} mastered={deckWords.filter((word) => state.reviews[word.id]?.repetitions >= 3).length} due={due.length} activity={activity} state={state} deckLevel={state.deckLevel} deckTotal={deckWords.length} setView={setView} />}
@@ -243,19 +260,21 @@ export default function App() {
         {view === 'typing' && <TypingPracticePage key={state.deckLevel} words={deckWords} deckLevel={state.deckLevel} update={update} />}
         {view === 'analytics' && <AnalyticsPage state={state} learned={reviewedIds.length} mastered={mastered} />}
         {view === 'notebook' && <Notebook state={state} setView={setView} />}
+        {view === 'admin' && user.role === 'admin' && <AdminActivityPage />}
       </main>
-      <MobileNavigation view={view} setView={setView} />
+      <MobileNavigation view={view} setView={setView} user={user} />
       {!state.onboarded && <Onboarding state={state} update={update} />}
       {commandOpen && <SearchDialog value={command} setValue={setCommand} close={() => setCommandOpen(false)} setView={setView} />}
     </div>
   )
 }
 
-function Sidebar({ state, view, setView, setTheme, openSearch }: { state: LearningState; view: View; setView: (view: View) => void; setTheme: () => void; openSearch: () => void }) {
+function Sidebar({ state, view, setView, setTheme, openSearch, user }: { state: LearningState; view: View; setView: (view: View) => void; setTheme: () => void; openSearch: () => void; user: AuthUser }) {
+  const visibleNav = user.role === 'admin' ? [...nav, adminNav] : nav
   return <aside className="sidebar">
     <button className="brand" onClick={() => setView('overview')} aria-label="Về tổng quan"><span>汉</span> HANZI</button>
     <button className="search-button side-search" onClick={openSearch}><span>⌕</span> Tìm kiếm <kbd>Ctrl K</kbd></button>
-    <nav aria-label="Điều hướng chính">{nav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)}><i>{item.icon}</i>{item.label}</button>)}</nav>
+    <nav aria-label="Điều hướng chính">{visibleNav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)}><i>{item.icon}</i>{item.label}</button>)}</nav>
     <div className="sidebar-footer">
       <button className={`nav-item ${view === 'notebook' ? 'active' : ''}`} onClick={() => setView('notebook')}><i>▣</i>Sổ tay lỗi sai</button>
       <button className="theme-button" onClick={setTheme}><span>{state.theme === 'light' ? '◐' : '☼'}</span>{state.theme === 'light' ? 'Chế độ tối' : 'Chế độ sáng'}</button>
@@ -539,6 +558,39 @@ function TypingPracticePage({ words, deckLevel, update }: { words: Vocabulary[];
   return <section className="page typing-page"><div className="review-heading"><div><p className="eyebrow">Luyện gõ · HSK {deckLevel}</p><h1>Pinyin tốc độ</h1></div><span>{sessionStartedAt ? formatTypingTime(remaining) : 'Bắt đầu khi bạn gõ'}</span></div><div className="typing-session-meta"><span>{attempts.length} lượt · {correctCount} đúng</span><span>Thời gian từ: {roundStartedAt ? formatTypingTime(roundTime) : '—'}</span></div><section className="typing-card"><p className="typing-instruction">Gõ pinyin cho từ này</p><p className="typing-hanzi">{word?.hanzi}</p><form onSubmit={submit}><input autoFocus value={answer} onChange={(event) => beginTyping(event.currentTarget.value)} disabled={!!feedback} placeholder="Ví dụ: ni hao hoặc ni3 hao3" autoComplete="off" autoCapitalize="none" spellCheck={false} /><button className="primary" type="submit" disabled={!answer.trim()}>{feedback ? 'Từ tiếp theo →' : 'Kiểm tra ↵'}</button></form>{feedback && <div className={`typing-feedback ${feedback.correct ? 'correct' : 'incorrect'}`}><b>{feedback.correct ? '✓ Chính xác' : '× Chưa đúng'}</b><p><span>{word?.pinyin}</span> · {word?.meaning}</p><small>{formatTypingTime(feedback.elapsedMs)}</small></div>}<p className="typing-hint">Dấu thanh không bắt buộc; khoảng trắng giữa các âm tiết là tùy chọn.</p></section></section>
 }
 
+function AdminActivityPage() {
+  const [entries, setEntries] = useState<ActivityEntry[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const load = async () => {
+    setLoading(true); setError('')
+    try {
+      const response = await fetch('/api/admin/activity?limit=50', { credentials: 'include' })
+      const data = await response.json() as { entries?: ActivityEntry[]; error?: string }
+      if (!response.ok) throw new Error(data.error || 'Không thể tải lịch sử hoạt động.')
+      setEntries(data.entries ?? [])
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Không thể tải lịch sử hoạt động.')
+    } finally { setLoading(false) }
+  }
+
+  useEffect(() => { load() }, [])
+  const actionLabel: Record<ActivityEntry['action'], string> = {
+    account_registered: 'Tạo tài khoản', login: 'Đăng nhập', logout: 'Đăng xuất', page_view: 'Mở trang học',
+  }
+  const pageLabels: Record<string, string> = {
+    overview: 'Tổng quan', vocabulary: 'Từ vựng', grammar: 'Ngữ pháp', exercises: 'Bài tập', review: 'Ôn tập', typing: 'Luyện gõ', analytics: 'Thống kê', notebook: 'Sổ tay lỗi sai', admin: 'Quản trị',
+  }
+
+  return <section className="page admin-page">
+    <div className="page-heading"><div><p className="eyebrow">Quyền quản trị</p><h1>Lịch sử hoạt động</h1><p className="muted">50 hoạt động truy cập gần nhất của các tài khoản khác.</p></div><button className="secondary" onClick={load} disabled={loading}>{loading ? 'Đang tải…' : 'Làm mới'}</button></div>
+    {error && <p className="admin-error" role="alert">{error}</p>}
+    {!loading && !error && !entries.length && <div className="empty-state large"><span>◌</span><h2>Chưa có hoạt động nào</h2><p>Hoạt động đăng nhập và mở trang học của các tài khoản khác sẽ xuất hiện ở đây.</p></div>}
+    {!!entries.length && <div className="activity-table-wrap"><table className="activity-table"><thead><tr><th>Thời gian</th><th>Tài khoản</th><th>Role</th><th>Hoạt động</th><th>Chi tiết</th></tr></thead><tbody>{entries.map((entry) => <tr key={entry.id}><td>{new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(entry.created_at))}</td><td><b>{entry.name || entry.email}</b>{entry.name && <small>{entry.email}</small>}</td><td><span className={`role-pill ${entry.role}`}>{entry.role}</span></td><td>{actionLabel[entry.action]}</td><td>{entry.action === 'page_view' ? pageLabels[entry.metadata.page ?? ''] || entry.metadata.page : '—'}</td></tr>)}</tbody></table></div>}
+  </section>
+}
+
 function AnalyticsPage({ state, learned, mastered }: { state: LearningState; learned: number; mastered: number }) {
   const days = Array.from({ length: 7 }, (_, index) => { const day = new Date(); day.setDate(day.getDate() - (6 - index)); return day })
   const totalMinutes = Object.values(state.activity).reduce((total, entry) => total + entry.minutes, 0)
@@ -556,4 +608,4 @@ function Onboarding({ state, update }: { state: LearningState; update: (recipe: 
 
 function SearchDialog({ value, setValue, close, setView }: { value: string; setValue: (value: string) => void; close: () => void; setView: (view: View) => void }) { const matching = vocabulary.filter((word) => normalized(`${word.hanzi} ${word.pinyin} ${word.meaning}`).includes(normalized(value))).slice(0, 5); return <div className="modal-layer search-layer" onMouseDown={close}><section className="search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="field-with-icon"><span>⌕</span><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => event.key === 'Escape' && close()} placeholder="Tìm Hán tự, pinyin, nghĩa…" /><kbd>Esc</kbd></div>{value ? <div className="search-results">{matching.length ? matching.map((word) => <button key={word.id} onClick={() => { setView('vocabulary'); close() }}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin}</small></span></button>) : <p>Không tìm thấy kết quả.</p>}</div> : <div className="search-hint"><p>Tìm nhanh từ vựng, ngữ pháp và bài học.</p><button onClick={() => { setView('grammar'); close() }}>⌘ Xem ngữ pháp</button><button onClick={() => { setView('review'); close() }}>↻ Mở ôn tập</button></div>}</section></div> }
 
-function MobileNavigation({ view, setView }: { view: View; setView: (view: View) => void }) { const mobileNav = nav.filter((item) => ['overview', 'vocabulary', 'typing', 'review', 'analytics'].includes(item.id)); return <nav className="mobile-nav" aria-label="Điều hướng di động">{mobileNav.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
+function MobileNavigation({ view, setView, user }: { view: View; setView: (view: View) => void; user: AuthUser }) { const mobileNav = [...nav, ...(user.role === 'admin' ? [adminNav] : [])].filter((item) => ['overview', 'vocabulary', 'typing', 'review', 'analytics', 'admin'].includes(item.id)); return <nav className="mobile-nav" aria-label="Điều hướng di động">{mobileNav.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
