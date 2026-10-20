@@ -1,13 +1,15 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useState } from 'react'
 import { exercises, grammar, Vocabulary, vocabulary, type Exercise } from './data'
 
-type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'analytics' | 'notebook' | 'admin'
+type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'exam' | 'analytics' | 'notebook' | 'admin'
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type DeckLevel = 1 | 2 | 3 | 4
 type Review = { dueAt: number; intervalHours: number; repetitions: number; lapses: number; lastRating: Rating; lastReviewedAt: number }
 type Mistake = { exerciseId: string; answer: string; occurredAt: number; count: number; prompt?: string; tags?: string[]; correctAnswer?: string; explanation?: string }
 type TypingAttempt = { wordId: string; deckLevel: DeckLevel; answer: string; correct: boolean; elapsedMs: number; completedAt: number }
 type Activity = Record<string, { cards: number; exercises: number; minutes: number }>
+type MockExamSession = { seed: number; title: string; currentQuestion: number; answers: Record<string, string>; startedAt: number }
+type MockExamResult = { id: number; title: string; completedAt: number; score: number; total: number; durationSeconds: number }
 type LearningState = {
   level: string
   deckLevel: DeckLevel
@@ -22,6 +24,8 @@ type LearningState = {
   completedGrammar: string[]
   completedExercises: string[]
   exerciseCursor: number
+  mockExam: MockExamSession | null
+  mockExamHistory: MockExamResult[]
   typingAttempts: TypingAttempt[]
 }
 type AuthUser = { id: number; email: string; name: string | null; role: 'learner' | 'admin' }
@@ -55,7 +59,7 @@ const hsk4VocabularyQuestionCount = hsk4ExerciseWords.length * 3
 const hsk4CurriculumLength = hsk4VocabularyQuestionCount + Math.floor(hsk4VocabularyQuestionCount / (grammarExerciseInterval - 1))
 const defaultState: LearningState = {
   level: 'HSK 4', deckLevel: 4, theme: 'light', goal: 15, onboarded: false, reviews: {}, favorites: [], difficult: [],
-  mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], exerciseCursor: 0, typingAttempts: [],
+  mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], exerciseCursor: 0, mockExam: null, mockExamHistory: [], typingAttempts: [],
 }
 
 function accountStorageKey(userId: number) {
@@ -123,6 +127,7 @@ const nav: Array<{ id: View; label: string; icon: string }> = [
   { id: 'exercises', label: 'Bài tập', icon: '✓' },
   { id: 'review', label: 'Ôn tập', icon: '↻' },
   { id: 'typing', label: 'Luyện gõ', icon: '⌨' },
+  { id: 'exam', label: 'Luyện thi', icon: '✦' },
   { id: 'analytics', label: 'Thống kê', icon: '▥' },
 ]
 const adminNav: { id: View; label: string; icon: string } = { id: 'admin', label: 'Quản trị', icon: '◈' }
@@ -263,6 +268,7 @@ export default function App() {
         {view === 'exercises' && <ExercisePage state={state} update={update} addActivity={addActivity} />}
         {view === 'review' && <ReviewPage key={state.deckLevel} words={reviewWords} deckLevel={state.deckLevel} setDeckLevel={setDeckLevel} rate={rate} difficult={state.difficult} toggleDifficult={toggleDifficult} />}
         {view === 'typing' && <TypingPracticePage key={state.deckLevel} words={deckWords} deckLevel={state.deckLevel} update={update} />}
+        {view === 'exam' && <MockExamPage state={state} update={update} addActivity={addActivity} />}
         {view === 'analytics' && <AnalyticsPage state={state} learned={reviewedIds.length} mastered={mastered} />}
         {view === 'notebook' && <Notebook state={state} setView={setView} />}
         {view === 'admin' && user.role === 'admin' && <AdminActivityPage />}
@@ -465,6 +471,88 @@ function restoreExerciseCursor(state: LearningState) {
   return cursor
 }
 
+type MockExamSection = 'listening' | 'reading' | 'writing'
+type MockExamQuestion = {
+  id: string; section: MockExamSection; part: number; kind: 'true-false' | 'choice' | 'fill' | 'sentence-order' | 'word-order' | 'write';
+  prompt: string; options: string[]; answer: string; explanation: string; audio?: string; statement?: string; pieces?: string[]; input?: boolean
+}
+const mockExamStructure: Array<{ id: MockExamSection; label: string; count: number }> = [
+  { id: 'listening', label: 'Nghe hiểu', count: 45 },
+  { id: 'reading', label: 'Đọc hiểu', count: 40 },
+  { id: 'writing', label: 'Viết', count: 15 },
+]
+const mockExamQuestionCount = mockExamStructure.reduce((total, section) => total + section.count, 0)
+const hsk4MockExamSets = Array.from({ length: 10 }, (_, index) => ({
+  id: `hsk4-mock-${String(index + 1).padStart(2, '0')}`,
+  title: `Đề mô phỏng ${String(index + 1).padStart(2, '0')}`,
+  seed: 41_001 + index * 9_973,
+}))
+const sentenceOrderTemplates = [
+  ['因为', '天气不好', '，', '所以', '我们', '没有出门'],
+  ['虽然', '这件事', '很困难', '，', '但是', '他', '没有放弃'],
+  ['如果', '你有时间', '，', '请', '给我', '打电话'],
+  ['除了', '小王', '以外', '，', '大家', '都到了'],
+  ['我', '已经', '把', '作业', '做完了'],
+  ['这本书', '被', '他', '看完了'],
+  ['老师', '让', '我们', '认真', '复习'],
+  ['他', '一边', '听音乐', '一边', '做饭'],
+  ['为了', '通过考试', '，', '她', '每天', '练习'],
+  ['我觉得', '这个办法', '比那个', '更合适'],
+]
+const writingOrderTemplates = [
+  ['我', '把', '手机', '放在', '桌子上了'],
+  ['他', '已经', '学了', '两年', '汉语'],
+  ['我们', '明天', '一起', '去', '图书馆'],
+  ['这件事', '让我', '非常', '感动'],
+  ['请', '把', '门', '关上'],
+  ['她', '比我', '早到', '十分钟'],
+  ['你', '最好', '先', '休息一下'],
+  ['他们', '正在', '讨论', '这个问题'],
+  ['我', '希望', '明年', '能去', '中国'],
+  ['经理', '给', '我们', '介绍了', '新同事'],
+]
+
+function mockExamQuestions(seed: number): MockExamQuestion[] {
+  let number = 0
+  return mockExamStructure.flatMap((section) => Array.from({ length: section.count }, (_, sectionIndex) => {
+    const wordIndex = (Math.abs(seed) + number * 37 + sectionIndex * 11) % hsk4ExerciseWords.length
+    const word = hsk4ExerciseWords[wordIndex]
+    const questionId = `${section.id}-${number + 1}`
+    number += 1
+    const explanation = `${word.hanzi} · ${word.pinyin} · ${word.meaning}`
+    if (section.id === 'listening' && sectionIndex < 10) {
+      const isTrue = sectionIndex % 2 === 0
+      const comparison = hsk4ExerciseWords[(wordIndex + 97) % hsk4ExerciseWords.length]
+      return { id: questionId, section: section.id, part: 1, kind: 'true-false', audio: word.example, statement: isTrue ? word.example : comparison.example, prompt: 'Nghe câu và chọn nội dung hiển thị đúng hay sai.', options: ['Đúng', 'Sai'], answer: isTrue ? 'Đúng' : 'Sai', explanation }
+    }
+    if (section.id === 'listening' && sectionIndex < 25) {
+      const dialogue = `女：你最近怎么样？\n男：${word.example}\n女：我明白了。`
+      return { id: questionId, section: section.id, part: 2, kind: 'choice', audio: dialogue, prompt: 'Nghe đoạn hội thoại ngắn và chọn câu người nam nói.', options: exerciseOptions(wordIndex, word.example, (candidate) => candidate.example, seed + number), answer: word.example, explanation }
+    }
+    if (section.id === 'listening') {
+      const passage = `小王最近有一个计划。${word.example}。他希望通过努力解决这个问题。`
+      return { id: questionId, section: section.id, part: 3, kind: 'choice', audio: passage, prompt: 'Nghe đoạn ngắn và chọn nghĩa của từ trọng tâm trong đoạn.', options: exerciseOptions(wordIndex, word.meaning, (candidate) => candidate.meaning, seed + number), answer: word.meaning, explanation }
+    }
+    if (section.id === 'reading') {
+      if (sectionIndex < 10) {
+        const sentence = word.example.includes(word.hanzi) ? word.example.replace(word.hanzi, '____') : `我觉得____很重要。`
+        return { id: questionId, section: section.id, part: 1, kind: 'fill', prompt: `Chọn từ thích hợp điền vào chỗ trống: ${sentence}`, options: exerciseOptions(wordIndex, word.hanzi, (candidate) => candidate.hanzi, seed + number), answer: word.hanzi, explanation }
+      }
+      if (sectionIndex < 20) {
+        const pieces = sentenceOrderTemplates[(sectionIndex - 10 + Math.abs(seed)) % sentenceOrderTemplates.length]
+        return { id: questionId, section: section.id, part: 2, kind: 'sentence-order', prompt: 'Sắp xếp các vế câu thành câu đúng.', options: [], pieces, answer: pieces.join('|'), explanation: pieces.join('') }
+      }
+      const passage = `${word.example} ${hsk4ExerciseWords[(wordIndex + 23) % hsk4ExerciseWords.length].example}`
+      return { id: questionId, section: section.id, part: 3, kind: 'choice', prompt: `Đọc đoạn văn: ${passage}`, options: exerciseOptions(wordIndex, word.meaning, (candidate) => candidate.meaning, seed + number), answer: word.meaning, explanation: `${explanation}. Đáp án dựa vào ngữ cảnh trong đoạn.` }
+    }
+    if (sectionIndex < 10) {
+      const pieces = writingOrderTemplates[(sectionIndex + Math.abs(seed)) % writingOrderTemplates.length]
+      return { id: questionId, section: section.id, part: 1, kind: 'word-order', prompt: 'Sắp xếp từ thành câu hoàn chỉnh.', options: [], pieces, answer: pieces.join('|'), explanation: pieces.join('') }
+    }
+    return { id: questionId, section: section.id, part: 2, kind: 'write', prompt: `Dựa vào pinyin “${word.pinyin}” và nghĩa “${word.meaning}”, hãy viết Hán tự.`, answer: word.hanzi, options: [], input: true, explanation }
+  }))
+}
+
 function ExercisePage({ state, update, addActivity }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void; addActivity: (kind: 'cards' | 'exercises', minutes?: number) => void }) {
   const [index, setIndex] = useState(() => restoreExerciseCursor(state)); const [answer, setAnswer] = useState<string | string[]>(''); const [result, setResult] = useState<boolean | null>(null)
   const complete = index >= hsk4CurriculumLength
@@ -496,6 +584,46 @@ function ExercisePage({ state, update, addActivity }: { state: LearningState; up
     </div>
     <SentenceBuilder />
   </section>
+}
+
+function MockExamPage({ state, update, addActivity }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void; addActivity: (kind: 'cards' | 'exercises', minutes?: number) => void }) {
+  const session = state.mockExam
+  const latestResult = state.mockExamHistory[0]
+  const startExam = (title = 'Đề mô phỏng ngẫu nhiên', seed = Date.now()) => {
+    const now = Date.now()
+    update((previous) => ({ ...previous, mockExam: { seed, title, currentQuestion: 0, answers: {}, startedAt: now } }))
+  }
+
+  if (!session) return <section className="page exam-page"><div className="page-heading"><div><p className="eyebrow">Đề mô phỏng · HSK 4</p><h1>Luyện thi HSK 4</h1><p className="muted">Chọn một trong 10 đề cố định để theo dõi điểm số, hoặc tạo đề ngẫu nhiên từ danh mục HSK 4.</p></div><span className="coverage">100 câu · 105 phút</span></div><section className="exam-intro"><div className="exam-section-list">{mockExamStructure.map((section) => <div key={section.id}><b>{section.count}</b><span>{section.label}</span></div>)}</div><p>Đề mô phỏng có nội dung nguyên bản, theo cấu trúc đề HSK 4 công khai. Một đề đang làm được lưu theo tài khoản để bạn có thể quay lại tiếp tục.</p><div className="exam-set-grid">{hsk4MockExamSets.map((set) => <button key={set.id} className="secondary" onClick={() => startExam(set.title, set.seed)}><b>{set.title}</b><small>45 nghe · 40 đọc · 15 viết</small></button>)}</div><button className="text-button" onClick={() => startExam()}>Tạo đề ngẫu nhiên <span>→</span></button><p className="exam-source-note">Tham khảo cấu trúc từ <a href="https://download.chinesetest.cn/newhsk-site/model/HSK4_yj.pdf" target="_blank" rel="noreferrer">đề mẫu HSK 4 của Chinese Test</a> và <a href="https://admin.chinesetest.cn/godownload.do" target="_blank" rel="noreferrer">trang tải tài liệu chính thức</a>.</p></section>{latestResult && <section className="chart-card exam-result-card"><p className="eyebrow">Đề gần nhất · {latestResult.title || 'Đề mô phỏng'}</p><h2>{latestResult.score}/{latestResult.total} câu đúng</h2><p className="muted">Hoàn thành {new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(latestResult.completedAt))} · {Math.max(1, Math.round(latestResult.durationSeconds / 60))} phút</p></section>}</section>
+
+  const questions = mockExamQuestions(session.seed)
+  const position = Math.min(session.currentQuestion, questions.length - 1)
+  const question = questions[position]
+  const section = mockExamStructure.find((item) => item.id === question.section)!
+  const answered = Object.keys(session.answers).length
+  const setAnswer = (answer: string) => update((previous) => previous.mockExam ? ({ ...previous, mockExam: { ...previous.mockExam, answers: { ...previous.mockExam.answers, [question.id]: answer } } }) : previous)
+  const orderedAnswer = session.answers[question.id]?.split('|').filter(Boolean) ?? []
+  const remainingPieces = (() => {
+    const used = new Map<string, number>()
+    orderedAnswer.forEach((piece) => used.set(piece, (used.get(piece) ?? 0) + 1))
+    return (question.pieces ?? []).filter((piece) => {
+      const count = used.get(piece) ?? 0
+      if (count > 0) { used.set(piece, count - 1); return false }
+      return true
+    })
+  })()
+  const questionTitle = question.kind === 'true-false' ? 'Nghe và xác định đúng/sai'
+    : question.kind === 'sentence-order' || question.kind === 'word-order' ? 'Sắp xếp thành câu đúng'
+      : question.kind === 'write' ? 'Viết Hán tự' : question.section === 'listening' ? 'Nghe và chọn đáp án' : 'Đọc và chọn đáp án'
+  const move = (nextPosition: number) => update((previous) => previous.mockExam ? ({ ...previous, mockExam: { ...previous.mockExam, currentQuestion: Math.min(Math.max(nextPosition, 0), mockExamQuestionCount - 1) } }) : previous)
+  const submit = () => {
+    const score = questions.filter((item) => session.answers[item.id]?.trim() === item.answer).length
+    const finishedAt = Date.now()
+    addActivity('exercises', Math.max(1, Math.round((finishedAt - session.startedAt) / 60_000)))
+    update((previous) => ({ ...previous, mockExam: null, mockExamHistory: [{ id: session.seed, title: session.title || 'Đề mô phỏng', completedAt: finishedAt, score, total: questions.length, durationSeconds: Math.round((finishedAt - session.startedAt) / 1000) }, ...previous.mockExamHistory].slice(0, 12) }))
+  }
+
+  return <section className="page exercise-page exam-page"><div className="page-heading"><div><p className="eyebrow">{session.title || 'Đề mô phỏng'} · {section.label}</p><h1>Đề mô phỏng đang làm</h1><p className="muted">Câu {position + 1}/{questions.length} · đã trả lời {answered}/{questions.length}. Tiến độ được lưu tự động.</p></div><button className="secondary" onClick={submit}>Nộp đề</button></div><div className="exam-progress"><i style={{ width: `${((position + 1) / questions.length) * 100}%` }} /></div><div className="exam-question-nav" aria-label="Đi tới câu hỏi">{questions.map((item, itemIndex) => <button key={item.id} className={`${itemIndex === position ? 'current' : ''} ${session.answers[item.id] ? 'answered' : ''}`} onClick={() => move(itemIndex)}>{itemIndex + 1}</button>)}</div><section className="exercise-shell"><p className="exercise-type">{section.label} · Phần {question.part} · Câu {position + 1}</p><h2>{questionTitle}</h2><p className="exercise-prompt">{question.prompt}</p>{question.audio && <button className="secondary exam-audio" onClick={() => speak(question.audio!)}>♪ Phát âm thanh</button>}{question.statement && <p className="exam-statement">Nội dung hiển thị: {question.statement}</p>}{question.pieces ? <div className="order-area"><div className="answer-line">{orderedAnswer.length ? orderedAnswer.map((piece, pieceIndex) => <button key={`${piece}-${pieceIndex}`} onClick={() => setAnswer(orderedAnswer.filter((_, index) => index !== pieceIndex).join('|'))}>{piece}</button>) : <span>Chạm vào các khối từ để sắp xếp câu</span>}</div><div className="word-bank">{remainingPieces.map((piece, pieceIndex) => <button key={`${piece}-${pieceIndex}`} onClick={() => setAnswer([...orderedAnswer, piece].join('|'))}>{piece}</button>)}</div><button className="text-button" onClick={() => setAnswer('')}>Đặt lại</button></div> : question.input ? <input className="exam-writing-input" value={session.answers[question.id] ?? ''} onChange={(event) => setAnswer(event.currentTarget.value)} placeholder="Nhập Hán tự" autoComplete="off" lang="zh-CN" /> : <div className="answer-options">{question.options.map((option) => <button key={option} className={session.answers[question.id] === option ? 'chosen' : ''} onClick={() => setAnswer(option)}>{option}</button>)}</div>}{session.answers[question.id] && <div className="feedback correct"><b>Đã lưu đáp án</b><p>Bạn vẫn có thể đổi đáp án trước khi nộp đề.</p></div>}<div className="exam-actions"><button className="secondary" disabled={position === 0} onClick={() => move(position - 1)}>← Câu trước</button>{position + 1 < questions.length ? <button className="primary" onClick={() => move(position + 1)}>Câu tiếp theo <span>→</span></button> : <button className="primary" onClick={submit}>Nộp đề <span>→</span></button>}</div></section></section>
 }
 
 function SentenceBuilder() {
@@ -670,4 +798,4 @@ function Onboarding({ state, update }: { state: LearningState; update: (recipe: 
 
 function SearchDialog({ value, setValue, close, setView }: { value: string; setValue: (value: string) => void; close: () => void; setView: (view: View) => void }) { const matching = vocabulary.filter((word) => normalized(`${word.hanzi} ${word.pinyin} ${word.meaning}`).includes(normalized(value))).slice(0, 5); return <div className="modal-layer search-layer" onMouseDown={close}><section className="search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="field-with-icon"><span>⌕</span><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => event.key === 'Escape' && close()} placeholder="Tìm Hán tự, pinyin, nghĩa…" /><kbd>Esc</kbd></div>{value ? <div className="search-results">{matching.length ? matching.map((word) => <button key={word.id} onClick={() => { setView('vocabulary'); close() }}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin}</small></span></button>) : <p>Không tìm thấy kết quả.</p>}</div> : <div className="search-hint"><p>Tìm nhanh từ vựng, ngữ pháp và bài học.</p><button onClick={() => { setView('grammar'); close() }}>⌘ Xem ngữ pháp</button><button onClick={() => { setView('review'); close() }}>↻ Mở ôn tập</button></div>}</section></div> }
 
-function MobileNavigation({ view, setView, user }: { view: View; setView: (view: View) => void; user: AuthUser }) { const mobileNav = [...nav, ...(user.role === 'admin' ? [adminNav] : [])].filter((item) => ['overview', 'vocabulary', 'typing', 'review', 'analytics', 'admin'].includes(item.id)); return <nav className="mobile-nav" aria-label="Điều hướng di động">{mobileNav.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
+function MobileNavigation({ view, setView, user }: { view: View; setView: (view: View) => void; user: AuthUser }) { const mobileNav = [...nav, ...(user.role === 'admin' ? [adminNav] : [])].filter((item) => ['overview', 'vocabulary', 'typing', 'review', 'exam', 'analytics', 'admin'].includes(item.id)); return <nav className="mobile-nav" aria-label="Điều hướng di động">{mobileNav.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
