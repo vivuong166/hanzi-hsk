@@ -1,11 +1,11 @@
 import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useState } from 'react'
-import { exercises, grammar, Vocabulary, vocabulary } from './data'
+import { exercises, grammar, Vocabulary, vocabulary, type Exercise } from './data'
 
 type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'analytics' | 'notebook' | 'admin'
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type DeckLevel = 1 | 2 | 3 | 4
 type Review = { dueAt: number; intervalHours: number; repetitions: number; lapses: number; lastRating: Rating; lastReviewedAt: number }
-type Mistake = { exerciseId: string; answer: string; occurredAt: number; count: number }
+type Mistake = { exerciseId: string; answer: string; occurredAt: number; count: number; prompt?: string; tags?: string[]; correctAnswer?: string; explanation?: string }
 type TypingAttempt = { wordId: string; deckLevel: DeckLevel; answer: string; correct: boolean; elapsedMs: number; completedAt: number }
 type Activity = Record<string, { cards: number; exercises: number; minutes: number }>
 type LearningState = {
@@ -48,6 +48,7 @@ const deckOptions: Array<{ level: DeckLevel; label: string }> = [
   { level: 3, label: 'HSK 3 · 300 từ' },
   { level: 4, label: 'HSK 4 · 600 từ' },
 ]
+const hsk4ExerciseWords = vocabulary.filter((word) => (word.sourceIndex ?? 0) >= 601 && (word.sourceIndex ?? 0) <= 1200)
 const defaultState: LearningState = {
   level: 'HSK 4', deckLevel: 4, theme: 'light', goal: 15, onboarded: false, reviews: {}, favorites: [], difficult: [],
   mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], typingAttempts: [],
@@ -313,8 +314,17 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => 
         method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, name }),
       })
-      const data = await response.json() as { user?: AuthUser; error?: string }
-      if (!response.ok || !data.user) throw new Error(data.error || 'Không thể tiếp tục. Vui lòng thử lại.')
+      const payload = await response.text()
+      let data: { user?: AuthUser; error?: string } = {}
+      try { data = payload ? JSON.parse(payload) as { user?: AuthUser; error?: string } : {} } catch { /* Handle a proxy/server response that is not JSON. */ }
+      if (!response.ok || !data.user) {
+        const fallback = response.status === 401
+          ? 'Email hoặc mật khẩu chưa đúng.'
+          : response.status >= 500
+            ? 'Máy chủ đang gặp lỗi. Vui lòng thử lại sau ít phút.'
+            : 'Máy chủ không trả về dữ liệu hợp lệ. Hãy thử tải lại trang.'
+        throw new Error(data.error || fallback)
+      }
       await onAuthenticated(data.user)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Không thể kết nối máy chủ.')
@@ -410,9 +420,44 @@ function GrammarPage({ state, update }: { state: LearningState; update: (recipe:
     </div></section>
 }
 
+function exerciseOptions(wordIndex: number, answer: string, value: (word: Vocabulary) => string, seed: number) {
+  const options = [answer]
+  for (let offset = 1; options.length < 4 && offset < hsk4ExerciseWords.length; offset += 1) {
+    const candidate = value(hsk4ExerciseWords[(wordIndex + offset * 73 + seed * 29) % hsk4ExerciseWords.length])
+    if (!options.includes(candidate)) options.push(candidate)
+  }
+  const score = (value: string) => [...value].reduce((total, character) => (total * 31 + character.charCodeAt(0) + seed * 17) % 10_007, 0)
+  return options.sort((first, second) => score(first) - score(second) || first.localeCompare(second, 'zh-CN'))
+}
+
+function exerciseForAttempt(attempt: number): Exercise {
+  // Every sixth prompt revisits the curated grammar exercises; the other prompts
+  // rotate through all 600 HSK 4 words and three question forms indefinitely.
+  if ((attempt + 1) % 6 === 0) return exercises[Math.floor(attempt / 6) % exercises.length]
+  const vocabularyAttempt = attempt - Math.floor((attempt + 1) / 6)
+  const wordIndex = vocabularyAttempt % hsk4ExerciseWords.length
+  const variation = Math.floor(vocabularyAttempt / hsk4ExerciseWords.length) % 3
+  const word = hsk4ExerciseWords[wordIndex]
+  const explanation = `${word.hanzi} · ${word.pinyin} · ${word.meaning}`
+
+  if (variation === 0) return {
+    id: `hsk4-meaning-${word.id}`, type: 'choice', title: 'Từ vựng HSK 4', prompt: `“${word.hanzi}” có nghĩa là gì?`,
+    options: exerciseOptions(wordIndex, word.meaning, (candidate) => candidate.meaning, vocabularyAttempt), answer: word.meaning, explanation, tags: ['HSK 4', 'Nghĩa từ'],
+  }
+  if (variation === 1) return {
+    id: `hsk4-pinyin-${word.id}`, type: 'choice', title: 'Pinyin HSK 4', prompt: `Chọn pinyin đúng cho “${word.hanzi}”.`,
+    options: exerciseOptions(wordIndex, word.pinyin, (candidate) => candidate.pinyin, vocabularyAttempt), answer: word.pinyin, explanation, tags: ['HSK 4', 'Pinyin'],
+  }
+  return {
+    id: `hsk4-hanzi-${word.id}`, type: 'choice', title: 'Nhận diện Hán tự', prompt: `Chọn Hán tự phù hợp với nghĩa “${word.meaning}”.`,
+    options: exerciseOptions(wordIndex, word.hanzi, (candidate) => candidate.hanzi, vocabularyAttempt), answer: word.hanzi, explanation, tags: ['HSK 4', 'Hán tự'],
+  }
+}
+
 function ExercisePage({ state, update, addActivity }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void; addActivity: (kind: 'cards' | 'exercises', minutes?: number) => void }) {
   const [index, setIndex] = useState(0); const [answer, setAnswer] = useState<string | string[]>(''); const [result, setResult] = useState<boolean | null>(null)
-  const exercise = exercises[index]
+  const exercise = exerciseForAttempt(index)
+  const progress = ((index % 10) + 1) * 10
   const check = () => {
     const correct = Array.isArray(exercise.answer) ? Array.isArray(answer) && answer.join('|') === exercise.answer.join('|') : answer === exercise.answer
     setResult(correct); addActivity('exercises')
@@ -420,17 +465,17 @@ function ExercisePage({ state, update, addActivity }: { state: LearningState; up
       const completed = previous.completedExercises.includes(exercise.id) ? previous.completedExercises : [...previous.completedExercises, exercise.id]
       if (correct) return { ...previous, completedExercises: completed }
       const old = previous.mistakes[exercise.id]
-      return { ...previous, completedExercises: completed, mistakes: { ...previous.mistakes, [exercise.id]: { exerciseId: exercise.id, answer: Array.isArray(answer) ? answer.join(' ') : answer || 'Chưa trả lời', occurredAt: Date.now(), count: (old?.count ?? 0) + 1 } } }
+      return { ...previous, completedExercises: completed, mistakes: { ...previous.mistakes, [exercise.id]: { exerciseId: exercise.id, answer: Array.isArray(answer) ? answer.join(' ') : answer || 'Chưa trả lời', occurredAt: Date.now(), count: (old?.count ?? 0) + 1, prompt: exercise.prompt, tags: exercise.tags, correctAnswer: Array.isArray(exercise.answer) ? exercise.answer.join(' ') : exercise.answer, explanation: exercise.explanation } } }
     })
   }
-  const next = () => { setIndex((value) => (value + 1) % exercises.length); setAnswer(''); setResult(null) }
+  const next = () => { setIndex((value) => value + 1); setAnswer(''); setResult(null) }
   const order = Array.isArray(answer) ? answer : []
   const remaining = exercise.type === 'order' ? (exercise.options ?? []).filter((word, i) => !order.some((picked, position) => picked === word && order.indexOf(picked) === position && position <= i)) : []
-  return <section className="page exercise-page"><div className="page-heading"><div><p className="eyebrow">Luyện tập · {index + 1}/{exercises.length}</p><h1>Bài tập</h1><p className="muted">Nhận phản hồi ngay để sửa đúng chỗ.</p></div><span className="coverage">{state.completedExercises.length} câu đã làm</span></div>
-    <div className="exercise-shell"><div className="exercise-progress"><i style={{ width: `${((index + 1) / exercises.length) * 100}%` }} /></div><p className="exercise-type">{exercise.type === 'order' ? 'Sắp xếp câu' : exercise.type === 'fill' ? 'Điền vào chỗ trống' : 'Chọn đáp án'}</p><h2>{exercise.title}</h2><p className="exercise-prompt">{exercise.prompt}</p>
+  return <section className="page exercise-page"><div className="page-heading"><div><p className="eyebrow">Luyện tập HSK 4 · Lượt {index + 1}</p><h1>Bài tập không giới hạn</h1><p className="muted">1.800 câu từ vựng HSK 4, xen kẽ bài ngữ pháp và tiếp tục tạo lượt mới khi bạn học.</p></div><span className="coverage">{state.completedExercises.length} câu riêng biệt đã làm</span></div>
+    <div className="exercise-shell"><div className="exercise-progress"><i style={{ width: `${progress}%` }} /></div><p className="exercise-type">{exercise.type === 'order' ? 'Sắp xếp câu' : exercise.type === 'fill' ? 'Điền vào chỗ trống' : 'Chọn đáp án'}</p><h2>{exercise.title}</h2><p className="exercise-prompt">{exercise.prompt}</p>
       {exercise.type === 'order' ? <div className="order-area"><div className="answer-line">{order.length ? order.map((word, wordIndex) => <button key={`${word}-${wordIndex}`} onClick={() => result === null && setAnswer(order.filter((_, i) => i !== wordIndex))}>{word}</button>) : <span>Chạm vào từ để xếp câu</span>}</div><div className="word-bank">{remaining.map((word, wordIndex) => <button key={`${word}-${wordIndex}`} disabled={result !== null} onClick={() => setAnswer([...order, word])}>{word}</button>)}</div><button className="text-button" onClick={() => { setAnswer([]); setResult(null) }}>Đặt lại</button></div> : <div className="answer-options">{exercise.options?.map((option) => <button key={option} disabled={result !== null} className={answer === option ? 'chosen' : ''} onClick={() => setAnswer(option)}>{option}</button>)}</div>}
       {result !== null && <div className={`feedback ${result ? 'correct' : 'incorrect'}`}><b>{result ? '✓ Chính xác' : '× Chưa đúng'}</b><p>{exercise.explanation}</p>{!result && <p><strong>Đáp án:</strong> {Array.isArray(exercise.answer) ? exercise.answer.join(' ') : exercise.answer}</p>}</div>}
-      <div className="exercise-actions">{result === null ? <button className="primary" disabled={Array.isArray(answer) ? !answer.length : !answer} onClick={check}>Kiểm tra</button> : <button className="primary" onClick={next}>{index === exercises.length - 1 ? 'Làm lại từ đầu' : 'Câu tiếp theo'} <span>→</span></button>}</div>
+      <div className="exercise-actions">{result === null ? <button className="primary" disabled={Array.isArray(answer) ? !answer.length : !answer} onClick={check}>Kiểm tra</button> : <button className="primary" onClick={next}>Câu tiếp theo <span>→</span></button>}</div>
     </div>
     <SentenceBuilder />
   </section>
@@ -601,7 +646,7 @@ function AnalyticsPage({ state, learned, mastered }: { state: LearningState; lea
 
 function Notebook({ state, setView }: { state: LearningState; setView: (view: View) => void }) {
   const entries = Object.values(state.mistakes).sort((a, b) => b.count - a.count)
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Ôn theo điểm yếu</p><h1>Sổ tay lỗi sai</h1><p className="muted">Những câu trả lời chưa đúng được lưu tự động để bạn quay lại đúng lúc.</p></div></div>{entries.length ? <div className="mistake-list">{entries.map((mistake) => { const exercise = exercises.find((item) => item.id === mistake.exerciseId)!; return <article key={mistake.exerciseId}><span className="mistake-number">{mistake.count}×</span><div><p className="eyebrow">{exercise.tags.join(' · ')}</p><h3>{exercise.prompt}</h3><p>Bạn chọn: <b>{mistake.answer}</b></p><p>Đáp án: <b>{Array.isArray(exercise.answer) ? exercise.answer.join(' ') : exercise.answer}</b></p><small>{exercise.explanation}</small></div><button className="secondary" onClick={() => setView('exercises')}>Làm lại</button></article>})}</div> : <div className="empty-state large"><span>✓</span><h2>Chưa có lỗi nào cần xem lại</h2><p>Sau khi làm bài, các câu sai sẽ xuất hiện ở đây cùng lời giải thích.</p><button className="primary" onClick={() => setView('exercises')}>Làm bài tập</button></div>}</section>
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Ôn theo điểm yếu</p><h1>Sổ tay lỗi sai</h1><p className="muted">Những câu trả lời chưa đúng được lưu tự động để bạn quay lại đúng lúc.</p></div></div>{entries.length ? <div className="mistake-list">{entries.map((mistake) => { const exercise = exercises.find((item) => item.id === mistake.exerciseId); const prompt = exercise?.prompt ?? mistake.prompt ?? 'Câu hỏi từ vựng HSK 4'; const tags = exercise?.tags ?? mistake.tags ?? ['HSK 4']; const correctAnswer = exercise?.answer ?? mistake.correctAnswer; const explanation = exercise?.explanation ?? mistake.explanation ?? 'Hãy quay lại bài tập để luyện lại từ này trong các lượt tiếp theo.'; return <article key={mistake.exerciseId}><span className="mistake-number">{mistake.count}×</span><div><p className="eyebrow">{tags.join(' · ')}</p><h3>{prompt}</h3><p>Bạn chọn: <b>{mistake.answer}</b></p>{correctAnswer && <p>Đáp án: <b>{Array.isArray(correctAnswer) ? correctAnswer.join(' ') : correctAnswer}</b></p>}<small>{explanation}</small></div><button className="secondary" onClick={() => setView('exercises')}>Làm lại</button></article>})}</div> : <div className="empty-state large"><span>✓</span><h2>Chưa có lỗi nào cần xem lại</h2><p>Sau khi làm bài, các câu sai sẽ xuất hiện ở đây cùng lời giải thích.</p><button className="primary" onClick={() => setView('exercises')}>Làm bài tập</button></div>}</section>
 }
 
 function Onboarding({ state, update }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void }) { const [goal, setGoal] = useState(state.goal); return <div className="modal-layer"><section className="onboarding"><span className="onboarding-mark">汉</span><p className="eyebrow">Chào mừng đến với HANZI</p><h1>Học tiếng Trung, có nhịp điệu.</h1><p>Chúng ta bắt đầu với một kế hoạch nhỏ, vừa sức cho mỗi ngày.</p><label>Trình độ hiện tại<select value="HSK 4" disabled><option>HSK 4 — Có nội dung</option></select></label><fieldset><legend>Mục tiêu từ mới mỗi ngày</legend><div className="goal-options">{[10, 15, 20].map((number) => <button className={goal === number ? 'selected' : ''} onClick={() => setGoal(number)} key={number}>{number} từ</button>)}</div></fieldset><button className="primary wide" onClick={() => update((previous) => ({ ...previous, goal, onboarded: true }))}>Bắt đầu học <span>→</span></button><small>Bạn luôn có thể thay đổi nhịp học sau này.</small></section></div> }
