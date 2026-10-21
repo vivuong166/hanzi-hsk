@@ -1,0 +1,459 @@
+/*
+ * V1 feature-preserving visual layer.
+ *
+ * This file intentionally only changes presentation. Learning state, storage keys,
+ * API calls, review scheduling, and every V1 screen stay in src/App.tsx.
+ */
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f5f4ef;
+}
+
+body {
+  background:
+    radial-gradient(circle at 0 0, rgba(209, 228, 214, .58), transparent 28rem),
+    radial-gradient(circle at 100% 100%, rgba(241, 222, 195, .48), transparent 35rem),
+    #f5f4ef;
+}
+
+.app {
+  --bg: #f5f4ef;
+  --surface: rgba(255, 254, 250, .9);
+  --surface-soft: #f0f1eb;
+  --text: #1b2924;
+  --muted: #748078;
+  --border: rgba(42, 72, 58, .14);
+  --accent: #1f6651;
+  --accent-hover: #174d3d;
+  --accent-soft: #e4f0e8;
+  --danger: #b85955;
+  --warning: #ae7931;
+  min-height: 100dvh;
+  background: transparent;
+}
+
+.app.dark {
+  --bg: #122019;
+  --surface: rgba(24, 38, 30, .92);
+  --surface-soft: #203229;
+  --text: #f2f5ee;
+  --muted: #a9b7ad;
+  --border: rgba(210, 233, 216, .16);
+  --accent: #8dccaa;
+  --accent-hover: #a7dcc0;
+  --accent-soft: #254a3a;
+  background: #122019;
+}
+
+.sidebar {
+  width: 258px;
+  inset: 20px auto 20px 20px;
+  height: calc(100dvh - 40px);
+  border: 1px solid var(--border);
+  border-radius: 25px;
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  box-shadow: 0 18px 60px rgba(37, 56, 43, .08);
+  padding: 23px 15px 14px;
+  backdrop-filter: blur(18px);
+}
+
+.brand {
+  padding: 3px 9px;
+  font-size: 17px;
+  letter-spacing: .12em;
+}
+
+.brand span,
+.mobile-brand {
+  width: 38px;
+  height: 38px;
+  border-radius: 13px;
+  background: linear-gradient(145deg, #296f59, #174a3b);
+  box-shadow: 0 8px 18px rgba(31, 102, 81, .2);
+}
+
+.side-search {
+  height: 44px;
+  margin: 29px 4px 18px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface-soft) 78%, transparent);
+}
+
+.sidebar nav {
+  gap: 5px;
+}
+
+.nav-item,
+.theme-button {
+  height: 45px;
+  border-radius: 12px;
+  padding-inline: 12px;
+}
+
+.nav-item.active {
+  box-shadow: inset 0 0 0 1px rgba(31, 102, 81, .12);
+}
+
+.sidebar-footer {
+  padding-top: 14px;
+}
+
+.main {
+  width: calc(100% - 298px);
+  margin-left: 298px;
+  min-height: 100dvh;
+  padding: 20px 20px 20px 0;
+}
+
+.topbar {
+  height: 74px;
+  padding: 0 26px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  box-shadow: 0 10px 36px rgba(37, 56, 43, .05);
+  backdrop-filter: blur(18px);
+}
+
+.top-search {
+  width: min(330px, 38vw);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--surface-soft) 75%, transparent);
+}
+
+.level-select,
+.account-button {
+  border-radius: 12px;
+}
+
+.account-button {
+  padding: 5px 7px 5px 5px;
+}
+
+.account-button:hover {
+  background: var(--surface-soft);
+}
+
+.avatar {
+  width: 34px;
+  height: 34px;
+  background: #f0d9bc;
+}
+
+.page {
+  max-width: 1380px;
+  padding: 48px 34px 56px;
+}
+
+.page h1,
+.welcome-row h1 {
+  font-size: clamp(32px, 3.15vw, 46px);
+  letter-spacing: -.06em;
+}
+
+.eyebrow {
+  color: #387964;
+  letter-spacing: .17em;
+}
+
+.primary,
+.secondary,
+.text-button {
+  border-radius: 13px;
+}
+
+.primary {
+  padding: 13px 18px;
+  background: linear-gradient(135deg, #27775f, #185742);
+  box-shadow: 0 9px 20px rgba(30, 96, 75, .18);
+}
+
+.primary:hover {
+  background: linear-gradient(135deg, #2e8067, #18513e);
+}
+
+.secondary {
+  background: color-mix(in srgb, var(--surface) 84%, transparent);
+  border-color: var(--border);
+}
+
+.progress-banner {
+  position: relative;
+  overflow: hidden;
+  padding: 30px 33px;
+  margin-top: 38px;
+  border: 1px solid rgba(38, 105, 81, .19);
+  border-radius: 23px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(250, 209, 109, .30), transparent 15rem),
+    linear-gradient(125deg, #e3f0e6, #f7f5ef 72%);
+  box-shadow: 0 15px 42px rgba(53, 87, 68, .07);
+}
+
+.dark .progress-banner {
+  background: linear-gradient(125deg, #244c3c, #1c2c24 72%);
+  border-color: rgba(141, 204, 170, .25);
+}
+
+.round-progress {
+  width: 82px;
+  height: 82px;
+  min-width: 82px;
+  box-shadow: 0 7px 20px rgba(41, 95, 71, .12);
+}
+
+.round-progress span {
+  width: 65px;
+  height: 65px;
+  background: #f5f7ef;
+}
+
+.dark .round-progress span {
+  background: #20392d;
+}
+
+.plan-grid {
+  gap: 15px;
+}
+
+.plan-card,
+.daily-card,
+.next-card,
+.chart-card,
+.library-layout,
+.grammar-layout,
+.exercise-shell,
+.exam-intro,
+.typing-setup,
+.typing-summary,
+.typing-card,
+.session-summary {
+  border-color: var(--border);
+  border-radius: 19px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  box-shadow: 0 13px 35px rgba(37, 56, 43, .045);
+}
+
+.plan-card {
+  min-height: 163px;
+  border-radius: 19px;
+  padding: 20px;
+}
+
+.plan-card:hover {
+  box-shadow: 0 17px 35px rgba(30, 77, 60, .12);
+}
+
+.plan-card i {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+}
+
+.overview-lower {
+  gap: 15px;
+}
+
+.daily-card,
+.next-card,
+.chart-card {
+  padding: 24px;
+}
+
+.stat-row,
+.analytics-stats,
+.summary-grid {
+  border-radius: 18px;
+  box-shadow: 0 12px 30px rgba(37, 56, 43, .04);
+}
+
+.stat {
+  padding: 21px 10px;
+}
+
+.stat strong {
+  color: var(--accent);
+}
+
+.library-layout,
+.grammar-layout {
+  border-radius: 20px;
+}
+
+.word-list-panel,
+.word-detail,
+.lesson {
+  padding-top: 24px;
+}
+
+.word-detail,
+.lesson {
+  padding-inline: clamp(26px, 4vw, 48px);
+}
+
+.field-with-icon,
+.filter-chips button,
+.level-select,
+.detail-actions button,
+.deck-picker button {
+  border-radius: 11px;
+}
+
+.word-row {
+  border-radius: 10px;
+  margin: 2px 0;
+  border-top-color: transparent;
+}
+
+.word-row.selected {
+  box-shadow: inset 3px 0 var(--accent), 0 5px 15px rgba(35, 88, 67, .06);
+}
+
+.flashcard {
+  min-height: 470px;
+}
+
+.card-face {
+  min-height: 470px;
+  border-radius: 26px;
+  border-color: var(--border);
+  background:
+    radial-gradient(circle at 85% 10%, rgba(244, 207, 125, .15), transparent 16rem),
+    color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: 0 20px 52px rgba(37, 56, 43, .08);
+}
+
+.dark .card-face {
+  background: radial-gradient(circle at 85% 10%, rgba(141, 204, 170, .09), transparent 16rem), var(--surface);
+}
+
+.hanzi-card {
+  font-size: clamp(92px, 14vw, 140px);
+}
+
+.rating-row {
+  gap: 11px;
+}
+
+.rating {
+  min-height: 72px;
+  border-radius: 14px;
+}
+
+.rating:hover {
+  box-shadow: 0 9px 20px rgba(37, 56, 43, .09);
+}
+
+.auth-loading,
+.auth-page {
+  background:
+    radial-gradient(circle at 10% 5%, rgba(210, 229, 215, .8), transparent 30rem),
+    radial-gradient(circle at 90% 90%, rgba(245, 217, 180, .58), transparent 32rem),
+    #f5f4ef;
+}
+
+.auth-card {
+  border-radius: 25px;
+  border-color: rgba(42, 72, 58, .14);
+  box-shadow: 0 28px 80px rgba(34, 68, 50, .15);
+}
+
+@media (max-width: 1040px) {
+  .sidebar {
+    width: 218px;
+    inset: 14px auto 14px 14px;
+    height: calc(100dvh - 28px);
+  }
+
+  .main {
+    width: calc(100% - 246px);
+    margin-left: 246px;
+    padding: 14px 14px 14px 0;
+  }
+}
+
+@media (max-width: 760px) {
+  body {
+    padding-bottom: 82px;
+  }
+
+  .main {
+    width: 100%;
+    margin-left: 0;
+    padding: 0;
+  }
+
+  .topbar {
+    height: 64px;
+    margin: 10px 11px 0;
+    padding: 0 14px;
+    border-radius: 18px;
+  }
+
+  .mobile-brand {
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+  }
+
+  .top-search {
+    margin: 0 10px;
+    border-radius: 11px;
+  }
+
+  .page {
+    padding: 34px 18px 38px;
+  }
+
+  .progress-banner {
+    padding: 22px;
+    border-radius: 19px;
+  }
+
+  .plan-card {
+    min-height: 144px;
+    padding: 16px;
+    border-radius: 17px;
+  }
+
+  .plan-card strong {
+    font-size: 22px;
+  }
+
+  .daily-card,
+  .next-card,
+  .chart-card {
+    padding: 20px;
+    border-radius: 17px;
+  }
+
+  .mobile-nav {
+    height: 70px;
+    bottom: 7px;
+    inset-inline: 9px;
+    width: auto;
+    border: 1px solid var(--border);
+    border-radius: 19px;
+    box-shadow: 0 15px 38px rgba(32, 55, 41, .16);
+    background: color-mix(in srgb, var(--surface) 93%, transparent);
+    backdrop-filter: blur(18px);
+  }
+
+  .mobile-nav button {
+    border-radius: 13px;
+  }
+
+  .mobile-nav button.active {
+    background: var(--accent-soft);
+  }
+
+  .flashcard,
+  .card-face {
+    min-height: min(500px, calc(100dvh - 245px));
+  }
+
+  .card-face {
+    border-radius: 22px;
+  }
+}

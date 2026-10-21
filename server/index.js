@@ -5,14 +5,17 @@ import cors from 'cors'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import path from 'node:path'
-import pg from 'pg'
 import { fileURLToPath } from 'node:url'
+import { createMemoryRateLimiter, createOriginGuard, parseOrigin, securityHeaders } from './security.js'
+import { createDatabasePool } from './db/connection.js'
+import { listDueReviews, parseReviewMutation, recordReview, StudyInputError } from './modules/study.js'
+import { listMistakes, parsePracticeMutation, recordPracticeAttempt } from './modules/practice.js'
 
-const { Pool } = pg
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const port = Number(process.env.PORT ?? 3001)
-const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://127.0.0.1:4173'
 const isProduction = process.env.NODE_ENV === 'production'
+const configuredClientOrigin = process.env.CLIENT_ORIGIN ?? 'http://127.0.0.1:4173'
+const clientOrigin = parseOrigin(configuredClientOrigin)
 const adminEmails = new Set((process.env.ADMIN_EMAILS ?? '')
   .split(',')
   .map((email) => email.trim().toLowerCase())
@@ -20,13 +23,40 @@ const adminEmails = new Set((process.env.ADMIN_EMAILS ?? '')
 
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required')
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) throw new Error('JWT_SECRET must be at least 32 characters')
+if (!clientOrigin) throw new Error('CLIENT_ORIGIN must be an absolute http(s) origin')
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
+const pool = createDatabasePool()
 const app = express()
+const allowedOrigins = isProduction ? [clientOrigin] : [clientOrigin, 'http://127.0.0.1:4173', 'http://localhost:5173']
+const authRateLimit = createMemoryRateLimiter({ windowMs: 15 * 60 * 1000, maxAttempts: 10 })
 
-app.use(cors({ origin: clientOrigin, credentials: true }))
+function isLocalViteOrigin(origin) {
+  const normalizedOrigin = parseOrigin(origin)
+  if (!normalizedOrigin) return false
+  const parsed = new URL(normalizedOrigin)
+  const localHost = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost'
+  const portNumber = Number(parsed.port)
+  return localHost && parsed.protocol === 'http:' && Number.isInteger(portNumber)
+    && ((portNumber >= 4173 && portNumber <= 4199) || (portNumber >= 5173 && portNumber <= 5199))
+}
+
+function allowsBrowserOrigin(origin) {
+  return allowedOrigins.includes(origin) || (!isProduction && isLocalViteOrigin(origin))
+}
+
+app.disable('x-powered-by')
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1)
+app.use(securityHeaders({ isProduction }))
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowsBrowserOrigin(origin)) return callback(null, true)
+    return callback(new Error('CORS origin is not allowed'))
+  },
+  credentials: true,
+}))
 app.use(express.json({ limit: '1mb' }))
 app.use(cookieParser())
+app.use(createOriginGuard({ allowedOrigins, isProduction, allowsDevelopmentOrigin: isLocalViteOrigin }))
 
 const cookieOptions = {
   httpOnly: true,
@@ -95,7 +125,7 @@ function requireAdmin(req, res, next) {
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
-app.post('/api/auth/register', async (req, res, next) => {
+app.post('/api/auth/register', authRateLimit, async (req, res, next) => {
   try {
     const credentials = readCredentials(req, res)
     if (!credentials) return
@@ -114,7 +144,7 @@ app.post('/api/auth/register', async (req, res, next) => {
   }
 })
 
-app.post('/api/auth/login', async (req, res, next) => {
+app.post('/api/auth/login', authRateLimit, async (req, res, next) => {
   try {
     const credentials = readCredentials(req, res)
     if (!credentials) return
@@ -186,6 +216,36 @@ app.put('/api/learning-state', requireUser, async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
+app.get('/api/study/reviews/due', requireUser, async (req, res, next) => {
+  try {
+    const requestedLimit = Number(req.query.limit)
+    const limit = Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 50) : 10
+    res.json({ items: await listDueReviews({ pool, userId: req.user.id, limit }) })
+  } catch (error) { next(error) }
+})
+
+app.post('/api/study/reviews', requireUser, async (req, res, next) => {
+  try {
+    const mutation = parseReviewMutation(req.body)
+    const result = await recordReview({ pool, userId: req.user.id, mutation })
+    res.status(result.replayed ? 200 : 201).json({ review: result })
+  } catch (error) { next(error) }
+})
+
+app.get('/api/practice/mistakes', requireUser, async (req, res, next) => {
+  try {
+    res.json({ items: await listMistakes({ pool, userId: req.user.id }) })
+  } catch (error) { next(error) }
+})
+
+app.post('/api/practice/attempts', requireUser, async (req, res, next) => {
+  try {
+    const mutation = parsePracticeMutation(req.body)
+    const result = await recordPracticeAttempt({ pool, userId: req.user.id, mutation })
+    res.status(result.replayed ? 200 : 201).json({ attempt: result })
+  } catch (error) { next(error) }
+})
+
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Không tìm thấy API.' }))
 
 if (isProduction) {
@@ -195,36 +255,28 @@ if (isProduction) {
 }
 
 app.use((error, _req, res, _next) => {
+  if (error instanceof StudyInputError) return res.status(error.status).json({ error: error.message })
   console.error(error)
   res.status(500).json({ error: 'Máy chủ gặp lỗi. Vui lòng thử lại.' })
 })
 
 async function start() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id BIGSERIAL PRIMARY KEY,
-      email VARCHAR(320) NOT NULL UNIQUE,
-      name VARCHAR(80),
-      password_hash TEXT NOT NULL,
-      role VARCHAR(32) NOT NULL DEFAULT 'learner',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(32) NOT NULL DEFAULT 'learner';
-    CREATE TABLE IF NOT EXISTS learning_states (
-      user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-      state JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS activity_logs (
-      id BIGSERIAL PRIMARY KEY,
-      user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      action VARCHAR(64) NOT NULL,
-      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE INDEX IF NOT EXISTS activity_logs_created_at_idx ON activity_logs (created_at DESC);
-    CREATE INDEX IF NOT EXISTS activity_logs_user_id_created_at_idx ON activity_logs (user_id, created_at DESC);
-  `)
+  const requiredV1Tables = ['users', 'learning_states', 'activity_logs']
+  const existingTables = await Promise.all(requiredV1Tables.map(async (table) => {
+    const result = await pool.query('SELECT to_regclass($1) AS relation', [`public.${table}`])
+    return result.rows[0]?.relation ? table : null
+  }))
+  const missingV1Tables = existingTables.filter((table) => table === null)
+  if (missingV1Tables.length) {
+    throw new Error(`V1 database schema is missing: ${missingV1Tables.join(', ')}. Run npm run db:migrate only on a backed-up/rehearsed database.`)
+  }
+
+  try {
+    await pool.query('SELECT 1 FROM schema_migrations LIMIT 1')
+  } catch (error) {
+    if (error?.code !== '42P01') throw error
+    console.warn('V1 compatibility mode: schema_migrations is absent; V2 event APIs remain unavailable until a rehearsed migration.')
+  }
   if (adminEmails.size) {
     await pool.query(
       "UPDATE users SET role = 'admin' WHERE lower(email) = ANY($1::text[])",
