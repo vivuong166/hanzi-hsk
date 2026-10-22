@@ -1,6 +1,21 @@
 export type AuthUser = { id: number; email: string; name: string | null; role: 'learner' | 'admin' }
 export type PracticeAttempt = { attemptId: string; exerciseId: string; isCorrect: boolean; occurredAt: string; explanation: string; replayed: boolean }
 export type MistakeRecord = { exerciseId: string; answer: string | string[]; incorrectCount: number; occurredAt: string }
+export type V2UpgradeStatus = {
+  v2SchemaReady: boolean
+  handoverEnabled: boolean
+  v1: { exists: boolean; updatedAt: string | null; sourceChecksum: string | null }
+  migration: 'schema_not_ready' | 'no_v1_state' | 'not_imported' | 'current' | 'stale'
+  lastImport: { id: string; sourceChecksum: string; completedAt: string | null; report: { unmapped?: unknown[] } | null } | null
+}
+export type V2ImportResult = {
+  status: 'no_v1_state' | 'already_imported' | 'imported' | 'v1_state_changed_after_import'
+  runId?: string
+  sourceChecksum?: string
+  importedChecksum?: string
+  imported?: Record<string, number>
+  unmapped?: unknown[]
+}
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -49,4 +64,12 @@ export function submitPracticeAttempt(exerciseId: string, answer: string | strin
 
 export async function getMistakes() {
   return (await request<{ items: MistakeRecord[] }>('/api/practice/mistakes')).items
+}
+
+export function getV2UpgradeStatus() {
+  return request<V2UpgradeStatus>('/api/v2/upgrade/status')
+}
+
+export function importV1IntoV2() {
+  return request<{ upgrade: V2ImportResult }>('/api/v2/upgrade/import-v1', { method: 'POST' })
 }

@@ -1,6 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
 import { exercises, getGrammarById, getVocabularyById, hsk2Curriculum, listVocabulary, grammar, type CurriculumLevel, type CurriculumVocabulary, type Exercise, type GrammarPoint } from '../content/curriculum'
-import { ApiError, getCurrentUser, getMistakes, register, signIn, signOut, submitPracticeAttempt, type AuthUser, type MistakeRecord } from './api'
+import { ApiError, getCurrentUser, getMistakes, getV2UpgradeStatus, importV1IntoV2, register, signIn, signOut, submitPracticeAttempt, type AuthUser, type MistakeRecord, type V2ImportResult, type V2UpgradeStatus } from './api'
 import './v2.css'
 
 type RouteKey = 'today' | 'vocabulary' | 'grammar' | 'practice' | 'mistakes' | 'progress' | 'settings'
@@ -341,7 +341,47 @@ function ProgressPage() {
 }
 
 function SettingsPage({ theme, setTheme, auth, refresh }: { theme: 'light' | 'dark'; setTheme: (theme: 'light' | 'dark') => void; auth: AuthState; refresh: () => Promise<void> }) {
-  return <section className="v2-page v2-settings-page"><PageHeader eyebrow="CÀI ĐẶT" title="Không gian học của bạn." description="Theme hoạt động cục bộ; đăng nhập mở event sync cho review và practice." /><section className="v2-settings-card"><div><span className="v2-setting-icon"><Icon name={theme === 'light' ? 'sun' : 'moon'} /></span><div><h2>Giao diện</h2><p>Đang dùng {theme === 'light' ? 'nền sáng ivory' : 'giao diện tối'}.</p></div></div><button className="v2-secondary-button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>Chuyển sang {theme === 'light' ? 'tối' : 'sáng'}</button></section><AuthCard auth={auth} refresh={refresh} /><section className="v2-settings-card"><div><span className="v2-setting-icon"><Icon name="book" /></span><div><h2>Curriculum</h2><p><strong>HSK 2.0 / 2015</strong> · danh mục tích lũy đến HSK 4.</p></div></div><span className="v2-badge">ĐÃ CHỐT</span></section></section>
+  return <section className="v2-page v2-settings-page"><PageHeader eyebrow="CÀI ĐẶT" title="Không gian học của bạn." description="Theme hoạt động cục bộ; đăng nhập mở event sync cho review và practice." /><section className="v2-settings-card"><div><span className="v2-setting-icon"><Icon name={theme === 'light' ? 'sun' : 'moon'} /></span><div><h2>Giao diện</h2><p>Đang dùng {theme === 'light' ? 'nền sáng ivory' : 'giao diện tối'}.</p></div></div><button className="v2-secondary-button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>Chuyển sang {theme === 'light' ? 'tối' : 'sáng'}</button></section><AuthCard auth={auth} refresh={refresh} /><UpgradeStatusCard auth={auth} /><section className="v2-settings-card"><div><span className="v2-setting-icon"><Icon name="book" /></span><div><h2>Curriculum</h2><p><strong>HSK 2.0 / 2015</strong> · danh mục tích lũy đến HSK 4.</p></div></div><span className="v2-badge">ĐÃ CHỐT</span></section></section>
+}
+
+function UpgradeStatusCard({ auth }: { auth: AuthState }) {
+  const [status, setStatus] = useState<V2UpgradeStatus | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  useEffect(() => {
+    if (auth.status !== 'authenticated') { setStatus(null); return }
+    void getV2UpgradeStatus().then(setStatus).catch((error) => setMessage(error instanceof ApiError ? error.message : 'Chưa thể kiểm tra trạng thái nâng cấp.'))
+  }, [auth.status])
+  const startImport = async () => {
+    setMessage('Đang tạo snapshot V1 và kiểm tra dữ liệu…')
+    try {
+      const result = await importV1IntoV2()
+      setMessage(importMessage(result.upgrade))
+      setStatus(await getV2UpgradeStatus())
+    } catch (error) {
+      setMessage(error instanceof ApiError ? error.message : 'Chưa thể bắt đầu handover V2.')
+    }
+  }
+  if (auth.status !== 'authenticated') return null
+  if (!status && !message) return <section className="v2-settings-card"><div><span className="v2-setting-icon"><Icon name="clock" /></span><div><h2>Kiểm tra nâng cấp V2</h2><p>Đang đọc trạng thái kế thừa dữ liệu V1…</p></div></div></section>
+  if (!status) return <section className="v2-settings-card"><div><span className="v2-setting-icon"><Icon name="info" /></span><div><h2>Kiểm tra nâng cấp V2</h2><p>{message}</p></div></div></section>
+  const unmapped = status.lastImport?.report?.unmapped?.length ?? 0
+  const summary = status.migration === 'current'
+    ? `Snapshot V1 hiện tại đã được ghi nhận cho V2${unmapped ? `; còn ${unmapped} mục legacy cần giữ nguyên` : ''}.`
+    : status.migration === 'stale'
+      ? 'Tiến độ V1 đã thay đổi sau lần import trước. V2 bị khóa để tránh ghi đè dữ liệu.'
+      : status.migration === 'not_imported'
+        ? 'Dữ liệu V1 vẫn nguyên vẹn và chưa được import sang model V2.'
+        : status.migration === 'no_v1_state'
+          ? 'Tài khoản chưa có tiến độ V1 trên máy chủ để kế thừa.'
+          : 'Server hiện vẫn ở chế độ V1. Migration và rehearsal cần hoàn tất trước khi V2 đọc/ghi learning events.'
+  return <section className="v2-settings-card v2-upgrade-card"><div><span className="v2-setting-icon"><Icon name={status.migration === 'current' ? 'check' : 'info'} /></span><div><p className="v2-eyebrow">KẾ THỪA V1 → V2</p><h2>{status.migration === 'current' ? 'Dữ liệu V1 đã có snapshot an toàn' : 'Handover dữ liệu có kiểm soát'}</h2><p>{summary}</p></div></div>{status.handoverEnabled && status.migration === 'not_imported' && <button className="v2-primary-button" onClick={() => void startImport()}>Tạo snapshot và import V1 <Icon name="arrow" size={17} /></button>}{status.migration === 'stale' && <p className="v2-session-note"><Icon name="info" size={16} /> Cần đối chiếu snapshot cũ trước khi handover tiếp; V2 không tự merge hai lịch học.</p>}{message && <p className="v2-session-note"><Icon name="info" size={16} /> {message}</p>}</section>
+}
+
+function importMessage(result: V2ImportResult) {
+  if (result.status === 'imported') return `Đã tạo snapshot và import ${result.imported?.reviewCards ?? 0} thẻ ôn từ V1.`
+  if (result.status === 'already_imported') return 'Snapshot V1 này đã được import trước đó; không tạo bản sao dữ liệu.'
+  if (result.status === 'v1_state_changed_after_import') return 'V1 đã thay đổi sau lần import trước; V2 đã khóa để tránh merge sai tiến độ.'
+  return 'Tài khoản chưa có tiến độ V1 trên máy chủ để import.'
 }
 
 function AuthCard({ auth, refresh }: { auth: AuthState; refresh: () => Promise<void> }) {

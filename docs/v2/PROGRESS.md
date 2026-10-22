@@ -1,5 +1,11 @@
 # HANZI V2 — Progress
 
+> **Cập nhật 21/10/2026 — V1-first:** `src/App.tsx` là runtime đang chạy. Đây là đợt nâng cấp UI/UX của V1, không phải thay thế V1 bằng shell `src/v2/`. Những mục Phase 1–3 bên dưới mô tả groundwork V2 đã dựng; `src/v2/` không phải entry point hiện tại. Xem `07-V1-UX-UPGRADE.md`.
+
+> **Cập nhật 22/10/2026 — V2 inherited upgrade:** Hướng sản phẩm chuyển sang hoàn thiện V2 như một upgrade kế thừa dữ liệu V1. V1 vẫn là runtime cho tới khi mỗi tài khoản đi qua snapshot/import/rehearsal/parity gate; không có auto-migration hoặc xóa `learning_states`. Xem `09-V2-UPGRADE-CONTRACT.md`.
+
+> **Cập nhật 22/10/2026 — handover foundation:** API có `GET /api/v2/upgrade/status` để kiểm tra V1 snapshot theo tài khoản và chỉ cho phép V2 learning API khi đầy đủ schema event. Importer khóa trường hợp V1 đã đổi sau import để tránh merge sai. `POST /api/v2/upgrade/import-v1` còn tắt mặc định và chỉ mở bằng cấu hình sau backup/rehearsal; chưa có dữ liệu thật nào được migrate.
+
 ## 21/10/2026 — Phase 0: audit & specification
 
 ### Đã làm

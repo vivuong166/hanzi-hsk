@@ -5,6 +5,7 @@
 - Browser backup: `hanzi.learning-state.v1.user-<id>`.
 - Server authoritative hiện có: `learning_states.state` theo `user_id`.
 - Các trường V1: reviews, favorites, difficult, mistakes, activity, completedGrammar, completedExercises, typingAttempts và mockExamHistory.
+- Các bổ sung UX V1 sau đó (`notebooks`, `recentLookups`, `preferences`) cũng thuộc snapshot V1. Chúng không bị bỏ khi V2 chưa có domain tương ứng.
 
 ## Mapping
 
@@ -26,6 +27,7 @@
 4. Rehearse trên database copy, chạy import hai lần, xác nhận lần hai không tạo thêm review/attempt.
 5. Chỉ đánh dấu migrated sau validation. Giữ snapshot để rollback đọc được; không xóa blob V1 trong phase đầu.
 6. Khi cả server và local backup tồn tại, chọn server state nếu đã migrate; local chỉ là fallback/import một lần có xác nhận, không được ghi đè silent.
+7. Sau handover, V2 là writer duy nhất cho event học mới của tài khoản đó. V1 giữ nguyên làm fallback/reference, không được phép tiếp tục ghi đồng thời rồi gây divergence.
 
 ## Mapper đã có (chưa chạy trên database)
 

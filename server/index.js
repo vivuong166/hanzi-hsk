@@ -10,6 +10,7 @@ import { createMemoryRateLimiter, createOriginGuard, parseOrigin, securityHeader
 import { createDatabasePool } from './db/connection.js'
 import { listDueReviews, parseReviewMutation, recordReview, StudyInputError } from './modules/study.js'
 import { listMistakes, parsePracticeMutation, recordPracticeAttempt } from './modules/practice.js'
+import { importUserV1State, inspectV1UpgradeStatus } from './migrations/import-v1-learning-state.js'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const port = Number(process.env.PORT ?? 3001)
@@ -27,6 +28,8 @@ if (!clientOrigin) throw new Error('CLIENT_ORIGIN must be an absolute http(s) or
 
 const pool = createDatabasePool()
 const app = express()
+const v2UpgradeEnabled = process.env.V2_UPGRADE_ENABLED === '1'
+let v2EventModelAvailable = false
 const allowedOrigins = isProduction ? [clientOrigin] : [clientOrigin, 'http://127.0.0.1:4173', 'http://localhost:5173']
 const authRateLimit = createMemoryRateLimiter({ windowMs: 15 * 60 * 1000, maxAttempts: 10 })
 
@@ -123,6 +126,15 @@ function requireAdmin(req, res, next) {
   next()
 }
 
+function requireV2EventModel(_req, res, next) {
+  if (!v2EventModelAvailable) {
+    return res.status(503).json({
+      error: 'Dữ liệu học V2 chưa sẵn sàng. Tiến độ V1 của bạn vẫn được giữ nguyên.',
+    })
+  }
+  next()
+}
+
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
 app.post('/api/auth/register', authRateLimit, async (req, res, next) => {
@@ -170,7 +182,7 @@ app.get('/api/auth/me', requireUser, (req, res) => res.json({ user: req.user }))
 
 app.post('/api/activity/page-view', requireUser, async (req, res) => {
   const page = typeof req.body?.page === 'string' ? req.body.page.trim().slice(0, 40) : ''
-  const allowedPages = new Set(['overview', 'vocabulary', 'grammar', 'exercises', 'review', 'typing', 'analytics', 'notebook', 'admin'])
+  const allowedPages = new Set(['overview', 'vocabulary', 'grammar', 'exercises', 'review', 'typing', 'exam', 'analytics', 'notebook', 'notebooks', 'settings', 'admin'])
   if (!allowedPages.has(page)) return res.status(400).json({ error: 'Trang hoạt động không hợp lệ.' })
   await recordActivity(req, req.user.id, 'page_view', { page })
   res.status(204).end()
@@ -216,7 +228,27 @@ app.put('/api/learning-state', requireUser, async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
-app.get('/api/study/reviews/due', requireUser, async (req, res, next) => {
+app.get('/api/v2/upgrade/status', requireUser, async (req, res, next) => {
+  try {
+    const status = await inspectV1UpgradeStatus(pool, req.user.id, { v2SchemaReady: v2EventModelAvailable })
+    res.json({ ...status, handoverEnabled: v2EventModelAvailable && v2UpgradeEnabled })
+  } catch (error) { next(error) }
+})
+
+app.post('/api/v2/upgrade/import-v1', requireUser, requireV2EventModel, async (req, res, next) => {
+  if (!v2UpgradeEnabled) {
+    return res.status(409).json({
+      error: 'Handover V2 chưa được bật. Cần hoàn tất backup và rehearsal database trước khi import dữ liệu thật.',
+    })
+  }
+  const client = await pool.connect()
+  try {
+    const upgrade = await importUserV1State(client, req.user.id)
+    res.status(upgrade.status === 'imported' ? 201 : 200).json({ upgrade })
+  } catch (error) { next(error) } finally { client.release() }
+})
+
+app.get('/api/study/reviews/due', requireUser, requireV2EventModel, async (req, res, next) => {
   try {
     const requestedLimit = Number(req.query.limit)
     const limit = Number.isInteger(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 50) : 10
@@ -224,7 +256,7 @@ app.get('/api/study/reviews/due', requireUser, async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
-app.post('/api/study/reviews', requireUser, async (req, res, next) => {
+app.post('/api/study/reviews', requireUser, requireV2EventModel, async (req, res, next) => {
   try {
     const mutation = parseReviewMutation(req.body)
     const result = await recordReview({ pool, userId: req.user.id, mutation })
@@ -232,13 +264,13 @@ app.post('/api/study/reviews', requireUser, async (req, res, next) => {
   } catch (error) { next(error) }
 })
 
-app.get('/api/practice/mistakes', requireUser, async (req, res, next) => {
+app.get('/api/practice/mistakes', requireUser, requireV2EventModel, async (req, res, next) => {
   try {
     res.json({ items: await listMistakes({ pool, userId: req.user.id }) })
   } catch (error) { next(error) }
 })
 
-app.post('/api/practice/attempts', requireUser, async (req, res, next) => {
+app.post('/api/practice/attempts', requireUser, requireV2EventModel, async (req, res, next) => {
   try {
     const mutation = parsePracticeMutation(req.body)
     const result = await recordPracticeAttempt({ pool, userId: req.user.id, mutation })
@@ -271,11 +303,14 @@ async function start() {
     throw new Error(`V1 database schema is missing: ${missingV1Tables.join(', ')}. Run npm run db:migrate only on a backed-up/rehearsed database.`)
   }
 
-  try {
-    await pool.query('SELECT 1 FROM schema_migrations LIMIT 1')
-  } catch (error) {
-    if (error?.code !== '42P01') throw error
-    console.warn('V1 compatibility mode: schema_migrations is absent; V2 event APIs remain unavailable until a rehearsed migration.')
+  const requiredV2Tables = ['schema_migrations', 'vocabulary_entries', 'review_cards', 'review_events', 'v1_import_runs']
+  const existingV2Tables = await Promise.all(requiredV2Tables.map(async (table) => {
+    const result = await pool.query('SELECT to_regclass($1) AS relation', [`public.${table}`])
+    return result.rows[0]?.relation ? table : null
+  }))
+  v2EventModelAvailable = existingV2Tables.every(Boolean)
+  if (!v2EventModelAvailable) {
+    console.warn('V1 compatibility mode: V2 event APIs remain unavailable until migrations, content seed and a rehearsal have completed.')
   }
   if (adminEmails.size) {
     await pool.query(

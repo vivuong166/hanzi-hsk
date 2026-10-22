@@ -1,5 +1,9 @@
 # HANZI V2 — Decisions
 
+> **Cập nhật 21/10/2026 — ADR-012:** V1 là runtime chính cho đợt nâng cấp UI/UX. Shell `src/v2/` chưa có feature parity nên không được thay thế V1; mọi modernize tiếp theo phải giữ state, local-storage key và endpoint V1.
+
+> **Cập nhật 22/10/2026 — ADR-013:** V2 được tiếp tục như một bản nâng cấp kế thừa V1. V1 state không bị xóa/ghi đè; V2 chỉ được kích hoạt theo từng tài khoản sau snapshot, import idempotent, rehearsal DB và kiểm tra parity. Xem `09-V2-UPGRADE-CONTRACT.md`.
+
 | ID | Ngày | Quyết định | Lý do / hệ quả |
 | --- | --- | --- | --- |
 | ADR-001 | 21/10/2026 | MVP chỉ dùng HSK 2.0/2015 | Đã có 1.200 mục content và provenance; tránh trộn curriculum/danh nhãn HSK 3.0 chưa sẵn sàng |
@@ -13,3 +17,5 @@
 | ADR-009 | 21/10/2026 | Rate limit hiện là memory-local baseline | Bảo vệ ngay một server instance; trước deploy multi-instance phải chuyển sang shared rate-limit store/edge, không được coi hiện trạng là distributed protection |
 | ADR-010 | 21/10/2026 | Dùng raw SQL migration runner có checksum | Giữ stack `pg` hiện có, tránh thêm ORM trước rehearsal; migration append-only, không auto-DDL lúc server start |
 | ADR-011 | 21/10/2026 | V1 import là CLI theo từng user, không auto-migrate lúc login | Bắt buộc backup/rehearsal và review `unmapped`; tránh âm thầm ghi dữ liệu không map được |
+| ADR-012 | 21/10/2026 | V1 là runtime chính trong đợt modernize UI/UX | Shell V2 chưa có feature parity nên không được thay thế V1; state và endpoint V1 được giữ nguyên |
+| ADR-013 | 22/10/2026 | V2 là upgrade kế thừa V1 theo handover gate | V1 JSON được snapshot bất biến, import idempotent và V2 không trở thành concurrent writer trước khi rehearsal/parity pass |

@@ -1,7 +1,7 @@
-import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useState } from 'react'
+import { CSSProperties, FormEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
 import { exercises, grammar, Vocabulary, vocabulary, type Exercise } from './data'
 
-type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'exam' | 'analytics' | 'notebook' | 'admin'
+type View = 'overview' | 'vocabulary' | 'grammar' | 'exercises' | 'review' | 'typing' | 'exam' | 'analytics' | 'notebook' | 'notebooks' | 'settings' | 'admin'
 type Rating = 'again' | 'hard' | 'good' | 'easy'
 type DeckLevel = 1 | 2 | 3 | 4
 type Review = { dueAt: number; intervalHours: number; repetitions: number; lapses: number; lastRating: Rating; lastReviewedAt: number }
@@ -10,6 +10,8 @@ type TypingAttempt = { wordId: string; deckLevel: DeckLevel; answer: string; cor
 type Activity = Record<string, { cards: number; exercises: number; minutes: number }>
 type MockExamSession = { seed: number; title: string; currentQuestion: number; answers: Record<string, string>; startedAt: number }
 type MockExamResult = { id: number; title: string; completedAt: number; score: number; total: number; durationSeconds: number }
+type PersonalNotebook = { id: string; name: string; wordIds: string[]; createdAt: number; updatedAt: number }
+type LearningPreferences = { autoPronounce: boolean; showPinyin: boolean; fontScale: 'default' | 'large'; speechRate: number }
 type LearningState = {
   level: string
   deckLevel: DeckLevel
@@ -27,6 +29,9 @@ type LearningState = {
   mockExam: MockExamSession | null
   mockExamHistory: MockExamResult[]
   typingAttempts: TypingAttempt[]
+  notebooks: PersonalNotebook[]
+  recentLookups: string[]
+  preferences: LearningPreferences
 }
 type AuthUser = { id: number; email: string; name: string | null; role: 'learner' | 'admin' }
 type ActivityEntry = {
@@ -60,16 +65,27 @@ const hsk4CurriculumLength = hsk4VocabularyQuestionCount + Math.floor(hsk4Vocabu
 const defaultState: LearningState = {
   level: 'HSK 4', deckLevel: 4, theme: 'light', goal: 15, onboarded: false, reviews: {}, favorites: [], difficult: [],
   mistakes: {}, activity: {}, completedGrammar: [], completedExercises: [], exerciseCursor: 0, mockExam: null, mockExamHistory: [], typingAttempts: [],
+  notebooks: [], recentLookups: [], preferences: { autoPronounce: false, showPinyin: true, fontScale: 'default', speechRate: 0.82 },
 }
 
 function accountStorageKey(userId: number) {
   return `${storageKey}.user-${userId}`
 }
 
+function hydrateLearningState(saved: Partial<LearningState>): LearningState {
+  return {
+    ...defaultState,
+    ...saved,
+    notebooks: Array.isArray(saved.notebooks) ? saved.notebooks : defaultState.notebooks,
+    recentLookups: Array.isArray(saved.recentLookups) ? saved.recentLookups : defaultState.recentLookups,
+    preferences: { ...defaultState.preferences, ...saved.preferences },
+  }
+}
+
 function readState(userId: number): LearningState | null {
   try {
     const saved = localStorage.getItem(accountStorageKey(userId))
-    return saved ? { ...defaultState, ...JSON.parse(saved) } : null
+    return saved ? hydrateLearningState(JSON.parse(saved) as Partial<LearningState>) : null
   } catch {
     return null
   }
@@ -83,12 +99,12 @@ function normalized(value: string) {
   return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }
 
-function speak(text: string) {
+function speak(text: string, rate = 0.82) {
   if (!('speechSynthesis' in window)) return
   window.speechSynthesis.cancel()
   const utterance = new SpeechSynthesisUtterance(text)
   utterance.lang = 'zh-CN'
-  utterance.rate = 0.82
+  utterance.rate = rate
   window.speechSynthesis.speak(utterance)
 }
 
@@ -132,11 +148,16 @@ const nav: Array<{ id: View; label: string; icon: string }> = [
 ]
 const adminNav: { id: View; label: string; icon: string } = { id: 'admin', label: 'Quản trị', icon: '◈' }
 
+const personalNav: { id: View; label: string; icon: string } = { id: 'notebooks', label: 'Sổ từ của tôi', icon: '▣' }
+const settingsNav: { id: View; label: string; icon: string } = { id: 'settings', label: 'Cài đặt học', icon: '⚙' }
+
 export default function App() {
   const [state, setState] = useState<LearningState>(defaultState)
   const [view, setView] = useState<View>('overview')
   const [commandOpen, setCommandOpen] = useState(false)
   const [command, setCommand] = useState('')
+  const [selectedWordId, setSelectedWordId] = useState<string | null>(null)
+  const [reviewQueue, setReviewQueue] = useState<{ wordIds: string[]; label: string } | null>(null)
   const [user, setUser] = useState<AuthUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
 
@@ -146,7 +167,7 @@ export default function App() {
       const saved = await fetch('/api/learning-state', { credentials: 'include' })
       if (saved.ok) {
         const savedData = await saved.json() as { state: Partial<LearningState> | null }
-        if (savedData.state) accountState = { ...defaultState, ...savedData.state }
+        if (savedData.state) accountState = hydrateLearningState(savedData.state)
       }
     } catch {
       // Keep the account-specific local backup when the API is temporarily unavailable.
@@ -216,7 +237,10 @@ export default function App() {
     .filter((word) => !state.reviews[word.id])
     .sort((first, second) => (first.sourceIndex ?? 0) - (second.sourceIndex ?? 0))
   const initialCards = unseenCards.slice(0, state.goal)
-  const reviewWords = due.length ? due : initialCards.length ? initialCards : deckWords.slice(0, state.goal)
+  const standardReviewWords = due.length ? due : initialCards.length ? initialCards : deckWords.slice(0, state.goal)
+  const reviewWords = reviewQueue
+    ? vocabulary.filter((word) => reviewQueue.wordIds.includes(word.id))
+    : standardReviewWords
 
   const setTheme = () => update((previous) => ({ ...previous, theme: previous.theme === 'light' ? 'dark' : 'light' }))
   const addActivity = (kind: 'cards' | 'exercises', minutes = 1) => update((previous) => {
@@ -239,6 +263,21 @@ export default function App() {
     ...previous, difficult: previous.difficult.includes(id) ? previous.difficult.filter((item) => item !== id) : [...previous.difficult, id],
   }))
   const setDeckLevel = (deckLevel: DeckLevel) => update((previous) => ({ ...previous, deckLevel, level: `HSK ${deckLevel}` }))
+  const openWord = (wordId: string) => {
+    setSelectedWordId(wordId)
+    setView('vocabulary')
+    update((previous) => ({ ...previous, recentLookups: [wordId, ...previous.recentLookups.filter((id) => id !== wordId)].slice(0, 8) }))
+  }
+  const addWordToNotebook = (notebookId: string, wordId: string) => update((previous) => ({
+    ...previous,
+    notebooks: previous.notebooks.map((notebook) => notebook.id !== notebookId || notebook.wordIds.includes(wordId)
+      ? notebook
+      : { ...notebook, wordIds: [...notebook.wordIds, wordId], updatedAt: Date.now() }),
+  }))
+  const startNotebookReview = (wordIds: string[], label: string) => {
+    setReviewQueue({ wordIds, label })
+    setView('review')
+  }
 
   const shared = { state, update, rate, toggleFavorite, toggleDifficult, setView, addActivity }
 
@@ -258,35 +297,38 @@ export default function App() {
   if (!user) return <AuthScreen onAuthenticated={hydrateAccount} />
 
   return (
-    <div className={`app ${state.theme === 'dark' ? 'dark' : ''}`}>
+    <div className={`app ${state.theme === 'dark' ? 'dark' : ''} ${state.preferences.fontScale === 'large' ? 'font-large' : ''}`}>
       <Sidebar state={state} view={view} setView={setView} setTheme={setTheme} openSearch={() => setCommandOpen(true)} user={user} />
       <main className="main">
         <Topbar due={due.length} openSearch={() => setCommandOpen(true)} user={user} deckLevel={state.deckLevel} setDeckLevel={setDeckLevel} logout={logout} />
         {view === 'overview' && <Overview reviewed={deckWords.filter((word) => state.reviews[word.id]).length} mastered={deckWords.filter((word) => state.reviews[word.id]?.repetitions >= 3).length} due={due.length} activity={activity} state={state} deckLevel={state.deckLevel} deckTotal={deckWords.length} setView={setView} />}
-        {view === 'vocabulary' && <VocabularyPage {...shared} />}
+        {view === 'vocabulary' && <VocabularyPage {...shared} selectedWordId={selectedWordId} onOpenWord={openWord} addWordToNotebook={addWordToNotebook} />}
         {view === 'grammar' && <GrammarPage state={state} update={update} />}
         {view === 'exercises' && <ExercisePage state={state} update={update} addActivity={addActivity} />}
-        {view === 'review' && <ReviewPage key={state.deckLevel} words={reviewWords} deckLevel={state.deckLevel} setDeckLevel={setDeckLevel} rate={rate} difficult={state.difficult} toggleDifficult={toggleDifficult} />}
+        {view === 'review' && <ReviewPage key={`${state.deckLevel}-${reviewQueue?.label ?? 'daily'}-${reviewQueue?.wordIds.join('-') ?? ''}`} words={reviewWords} deckLevel={state.deckLevel} setDeckLevel={setDeckLevel} rate={rate} difficult={state.difficult} toggleDifficult={toggleDifficult} speechRate={state.preferences.speechRate} label={reviewQueue?.label} clearCustomQueue={() => setReviewQueue(null)} />}
         {view === 'typing' && <TypingPracticePage key={state.deckLevel} words={deckWords} deckLevel={state.deckLevel} update={update} />}
         {view === 'exam' && <MockExamPage state={state} update={update} addActivity={addActivity} />}
         {view === 'analytics' && <AnalyticsPage state={state} learned={reviewedIds.length} mastered={mastered} />}
         {view === 'notebook' && <Notebook state={state} setView={setView} />}
+        {view === 'notebooks' && <PersonalNotebooksPage state={state} update={update} openWord={openWord} startReview={startNotebookReview} />}
+        {view === 'settings' && <SettingsPage state={state} update={update} />}
         {view === 'admin' && user.role === 'admin' && <AdminActivityPage />}
       </main>
       <MobileNavigation view={view} setView={setView} user={user} />
       {!state.onboarded && <Onboarding state={state} update={update} />}
-      {commandOpen && <SearchDialog value={command} setValue={setCommand} close={() => setCommandOpen(false)} setView={setView} />}
+      {commandOpen && <SearchDialog value={command} setValue={setCommand} close={() => setCommandOpen(false)} setView={setView} recentLookups={state.recentLookups} openWord={openWord} />}
     </div>
   )
 }
 
 function Sidebar({ state, view, setView, setTheme, openSearch, user }: { state: LearningState; view: View; setView: (view: View) => void; setTheme: () => void; openSearch: () => void; user: AuthUser }) {
-  const visibleNav = user.role === 'admin' ? [...nav, adminNav] : nav
+  const visibleNav = [...nav, personalNav, ...(user.role === 'admin' ? [adminNav] : [])]
   return <aside className="sidebar">
     <button className="brand" onClick={() => setView('overview')} aria-label="Về tổng quan"><span>汉</span> HANZI</button>
     <button className="search-button side-search" onClick={openSearch}><span>⌕</span> Tìm kiếm <kbd>Ctrl K</kbd></button>
     <nav aria-label="Điều hướng chính">{visibleNav.map((item) => <button key={item.id} className={`nav-item ${view === item.id ? 'active' : ''}`} onClick={() => setView(item.id)}><i>{item.icon}</i>{item.label}</button>)}</nav>
     <div className="sidebar-footer">
+      <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}><i>⚙</i>Cài đặt học</button>
       <button className={`nav-item ${view === 'notebook' ? 'active' : ''}`} onClick={() => setView('notebook')}><i>▣</i>Sổ tay lỗi sai</button>
       <button className="theme-button" onClick={setTheme}><span>{state.theme === 'light' ? '◐' : '☼'}</span>{state.theme === 'light' ? 'Chế độ tối' : 'Chế độ sáng'}</button>
     </div>
@@ -391,10 +433,14 @@ function Overview({ reviewed, mastered, due, activity, state, deckLevel, deckTot
 function PlanCard({ icon, value, text, tone, onClick }: { icon: string; value: string; text: string; tone: string; onClick: () => void }) { return <button className={`plan-card ${tone}`} onClick={onClick}><i>{icon}</i><strong>{value}</strong><span>{text}</span><b>→</b></button> }
 function Stat({ label, value }: { label: string; value: number | string }) { return <div className="stat"><strong>{value}</strong><span>{label}</span></div> }
 
-function VocabularyPage({ state, toggleFavorite, toggleDifficult }: Pick<{ state: LearningState; toggleFavorite: (id: string) => void; toggleDifficult: (id: string) => void }, 'state' | 'toggleFavorite' | 'toggleDifficult'>) {
+function VocabularyPage({ state, toggleFavorite, toggleDifficult, selectedWordId, onOpenWord, addWordToNotebook }: Pick<{ state: LearningState; toggleFavorite: (id: string) => void; toggleDifficult: (id: string) => void }, 'state' | 'toggleFavorite' | 'toggleDifficult'> & { selectedWordId: string | null; onOpenWord: (wordId: string) => void; addWordToNotebook: (notebookId: string, wordId: string) => void }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('Tất cả')
   const [selected, setSelected] = useState<Vocabulary>(vocabulary[0])
+  useEffect(() => {
+    const requested = vocabulary.find((word) => word.id === selectedWordId)
+    if (requested) setSelected(requested)
+  }, [selectedWordId])
   const curatedCount = vocabulary.filter((word) => word.contentStatus === 'curated').length
   const matches = vocabulary.filter((word) => {
     const haystack = normalized(`${word.hanzi} ${word.pinyin} ${word.meaning} ${word.topic}`)
@@ -403,8 +449,8 @@ function VocabularyPage({ state, toggleFavorite, toggleDifficult }: Pick<{ state
   })
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Thư viện · HSK 2.0 / 2015</p><h1>Từ vựng HSK 4</h1><p className="muted">Đủ {vocabulary.length} từ tích lũy của HSK 4, có pinyin, nghĩa Việt, từ loại và câu ví dụ. Trong đó, 600 từ cuối được giới thiệu ở riêng cấp HSK 4; {curatedCount} mục có bản dịch ví dụ tiếng Việt do dự án biên soạn.</p></div><span className="coverage">HSK 4 · 1.200 từ</span></div>
-    <div className="library-layout"><div className="word-list-panel"><div className="field-with-icon"><span>⌕</span><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm Hán tự, pinyin hoặc nghĩa…" /></div><div className="filter-chips">{['Tất cả', 'Từ mới HSK 4', 'Chưa học', 'Đã học', 'Yêu thích', 'Khó'].map((item) => <button className={filter === item ? 'selected' : ''} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div><p className="results-label">{matches.length} kết quả</p><div className="word-list">{matches.map((word) => <button key={word.id} className={`word-row ${selected.id === word.id ? 'selected' : ''}`} onClick={() => setSelected(word)}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin} · {word.partOfSpeech}</small></span><em>{state.reviews[word.id] ? 'Đã học' : word.contentStatus === 'curated' ? word.topic : `HSK ${word.introducedAtLevel}`}</em></button>)}{!matches.length && <div className="empty-state">Không tìm thấy từ phù hợp. Hãy thử một cách viết khác.</div>}</div></div>
-      <WordDetail word={selected} state={state} toggleFavorite={toggleFavorite} toggleDifficult={toggleDifficult} />
+    <div className="library-layout"><div className="word-list-panel"><div className="field-with-icon"><span>⌕</span><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm Hán tự, pinyin hoặc nghĩa…" /></div><div className="filter-chips">{['Tất cả', 'Từ mới HSK 4', 'Chưa học', 'Đã học', 'Yêu thích', 'Khó'].map((item) => <button className={filter === item ? 'selected' : ''} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div><p className="results-label">{matches.length} kết quả</p><div className="word-list">{matches.map((word) => <button key={word.id} className={`word-row ${selected.id === word.id ? 'selected' : ''}`} onClick={() => { setSelected(word); onOpenWord(word.id) }}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin} · {word.partOfSpeech}</small></span><em>{state.reviews[word.id] ? 'Đã học' : word.contentStatus === 'curated' ? word.topic : `HSK ${word.introducedAtLevel}`}</em></button>)}{!matches.length && <div className="empty-state">Không tìm thấy từ phù hợp. Hãy thử một cách viết khác.</div>}</div></div>
+      <div className="word-detail-stack"><WordDetail word={selected} state={state} toggleFavorite={toggleFavorite} toggleDifficult={toggleDifficult} /><WordLearningTools word={selected} state={state} onOpenWord={onOpenWord} addWordToNotebook={addWordToNotebook} /></div>
     </div>
   </section>
 }
@@ -416,6 +462,103 @@ function WordDetail({ word, state, toggleFavorite, toggleDifficult }: { word: Vo
     <div className="example"><span>Ví dụ</span><p className="chinese-sentence">{word.example}</p>{word.translation && <p>{word.translation}</p>}<button className="inline-audio" onClick={() => speak(word.example)}>♪ Nghe câu</button></div>
     <dl className="word-meta"><div><dt>{word.contentStatus === 'curated' ? 'Độ khó' : 'Xuất hiện từ'}</dt><dd>{word.contentStatus === 'curated' ? `${'●'.repeat(word.difficulty)}${'○'.repeat(3 - word.difficulty)}` : `HSK ${word.introducedAtLevel}`}</dd></div><div><dt>{word.contentStatus === 'curated' ? 'Ôn lại' : 'Số thứ tự nguồn'}</dt><dd>{word.contentStatus === 'curated' ? review ? dateLabel(review.dueAt) : 'Chưa có lịch ôn' : `#${word.sourceIndex} / 1.200`}</dd></div>{word.grammarId && <div><dt>Liên kết</dt><dd>Ngữ pháp liên quan</dd></div>}</dl>
   </article>
+}
+
+type BrowserRecognitionResultEvent = Event & { results: ArrayLike<ArrayLike<{ transcript: string }>> }
+type BrowserRecognition = {
+  lang: string
+  interimResults: boolean
+  maxAlternatives: number
+  start: () => void
+  onresult: ((event: BrowserRecognitionResultEvent) => void) | null
+  onerror: ((event: { error?: string }) => void) | null
+  onend: (() => void) | null
+}
+type BrowserRecognitionConstructor = new () => BrowserRecognition
+
+function getBrowserRecognitionConstructor() {
+  const browser = window as typeof window & { SpeechRecognition?: BrowserRecognitionConstructor; webkitSpeechRecognition?: BrowserRecognitionConstructor }
+  return browser.SpeechRecognition ?? browser.webkitSpeechRecognition ?? null
+}
+
+function WritingPad({ word }: { word: Vocabulary }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const lastPoint = useRef<{ x: number; y: number } | null>(null)
+  const [strokes, setStrokes] = useState(0)
+
+  const pointFor = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const canvas = event.currentTarget
+    const rect = canvas.getBoundingClientRect()
+    return { x: (event.clientX - rect.left) * (canvas.width / rect.width), y: (event.clientY - rect.top) * (canvas.height / rect.height) }
+  }
+  const clear = () => {
+    const canvas = canvasRef.current
+    const context = canvas?.getContext('2d')
+    if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height)
+    lastPoint.current = null
+    setStrokes(0)
+  }
+  useEffect(() => { clear() }, [word.id])
+  const startStroke = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    lastPoint.current = pointFor(event)
+    setStrokes((count) => count + 1)
+  }
+  const draw = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!lastPoint.current) return
+    const canvas = canvasRef.current
+    const context = canvas?.getContext('2d')
+    if (!canvas || !context) return
+    const next = pointFor(event)
+    context.strokeStyle = '#1f6651'
+    context.lineWidth = 11
+    context.lineCap = 'round'
+    context.lineJoin = 'round'
+    context.beginPath()
+    context.moveTo(lastPoint.current.x, lastPoint.current.y)
+    context.lineTo(next.x, next.y)
+    context.stroke()
+    lastPoint.current = next
+  }
+  return <section className="word-tool writing-tool"><div><p className="eyebrow">Viết tự do</p><h4>Viết lại {word.hanzi}</h4><p>Đây là bảng tập nét tự do trên trình duyệt; chưa có nhận diện chữ viết hay chấm thứ tự nét.</p></div><canvas ref={canvasRef} width="640" height="280" aria-label={`Bảng luyện viết ${word.hanzi}`} onPointerDown={startStroke} onPointerMove={draw} onPointerUp={() => { lastPoint.current = null }} onPointerCancel={() => { lastPoint.current = null }} /><div className="tool-footer"><span>{strokes ? `${strokes} nét đã vẽ` : 'Dùng chuột hoặc ngón tay để viết.'}</span><button className="secondary" onClick={clear}>Xoá bảng</button></div></section>
+}
+
+function PronunciationPractice({ word, speechRate }: { word: Vocabulary; speechRate: number }) {
+  const [listening, setListening] = useState(false)
+  const [message, setMessage] = useState('')
+  const available = typeof window !== 'undefined' && Boolean(getBrowserRecognitionConstructor())
+  const startListening = () => {
+    const Recognition = getBrowserRecognitionConstructor()
+    if (!Recognition) { setMessage('Trình duyệt này chưa hỗ trợ nhận chữ từ giọng nói. Bạn vẫn có thể nghe mẫu rồi tự đọc lại.'); return }
+    const recognition = new Recognition()
+    recognition.lang = 'zh-CN'
+    recognition.interimResults = false
+    recognition.maxAlternatives = 1
+    recognition.onresult = (event) => {
+      const transcript = event.results[0]?.[0]?.transcript?.trim() ?? ''
+      setMessage(transcript ? `Trình duyệt nghe: “${transcript}”. Đây chỉ là transcript tham khảo, không phải điểm phát âm.` : 'Chưa nhận được transcript.')
+    }
+    recognition.onerror = (event) => setMessage(event.error === 'not-allowed' ? 'Bạn đã từ chối microphone. Hãy cho phép quyền mic nếu muốn thử lại.' : 'Chưa thể nhận transcript. Hãy thử lại ở nơi yên tĩnh.')
+    recognition.onend = () => setListening(false)
+    setMessage('Đang nghe… Hãy đọc rõ từ trên.')
+    setListening(true)
+    recognition.start()
+  }
+  return <section className="word-tool pronunciation-tool"><div><p className="eyebrow">Luyện đọc</p><h4>Nghe, nhắc lại, tự đối chiếu</h4><p>Microphone chỉ được yêu cầu khi bạn bấm “Bắt đầu nghe”. Kết quả không phải chấm điểm phát âm.</p></div><div className="tool-actions"><button className="secondary" onClick={() => speak(word.hanzi, speechRate)}>♪ Nghe mẫu</button><button className="primary" disabled={listening} onClick={startListening}>{listening ? 'Đang nghe…' : available ? 'Bắt đầu nghe' : 'Kiểm tra hỗ trợ'}</button></div>{message && <p className="tool-message" role="status">{message}</p>}</section>
+}
+
+function WordLearningTools({ word, state, onOpenWord, addWordToNotebook }: { word: Vocabulary; state: LearningState; onOpenWord: (wordId: string) => void; addWordToNotebook: (notebookId: string, wordId: string) => void }) {
+  const relatedWords = vocabulary.filter((candidate) => candidate.id !== word.id && candidate.topic === word.topic).slice(0, 4)
+  const grammarPoint = word.grammarId ? grammar.find((point) => point.id === word.grammarId) : null
+  useEffect(() => {
+    if (state.preferences.autoPronounce) speak(word.hanzi, state.preferences.speechRate)
+  }, [word.id, state.preferences.autoPronounce, state.preferences.speechRate])
+  return <section className="word-learning-tools">
+    <section className="word-tool"><p className="eyebrow">Sổ từ cá nhân</p><h4>Lưu từ vào một mục tiêu cụ thể</h4>{state.notebooks.length ? <label className="notebook-select">Chọn sổ<select defaultValue="" onChange={(event) => { if (event.currentTarget.value) { addWordToNotebook(event.currentTarget.value, word.id); event.currentTarget.value = '' } }}><option value="" disabled>Thêm {word.hanzi} vào sổ…</option>{state.notebooks.map((notebook) => <option value={notebook.id} key={notebook.id}>{notebook.name}{notebook.wordIds.includes(word.id) ? ' · đã có' : ''}</option>)}</select></label> : <p className="muted">Chưa có sổ từ. Mở “Sổ từ của tôi” ở thanh điều hướng để tạo sổ đầu tiên.</p>}</section>
+    <section className="word-tool"><p className="eyebrow">Ngữ cảnh</p><h4>{grammarPoint ? `Ngữ pháp liên quan: ${grammarPoint.title}` : 'Mở rộng vốn từ cùng chủ đề'}</h4>{relatedWords.length ? <div className="related-word-list">{relatedWords.map((candidate) => <button key={candidate.id} onClick={() => onOpenWord(candidate.id)}><span lang="zh-CN">{candidate.hanzi}</span><small>{state.preferences.showPinyin ? candidate.pinyin : 'Pinyin đang ẩn'}</small><b>{candidate.meaning}</b></button>)}</div> : <p className="muted">Chưa có gợi ý cùng chủ đề cho mục này.</p>}</section>
+    <PronunciationPractice word={word} speechRate={state.preferences.speechRate} />
+    <WritingPad word={word} />
+  </section>
 }
 
 function GrammarPage({ state, update }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void }) {
@@ -633,9 +776,10 @@ function SentenceBuilder() {
   return <section className="sentence-builder"><div><p className="eyebrow">Học qua cấu trúc</p><h2>Tạo câu</h2><p className="muted">“Mặc dù hôm nay trời mưa, nhưng tôi vẫn đi học.”</p></div><div className="builder-answer">{built.length ? built.map((piece) => <button key={piece} onClick={() => setBuilt(built.filter((item) => item !== piece))}>{piece}</button>) : <span>Chạm vào các khối từ bên dưới</span>}</div><div className="word-bank">{unused.map((piece) => <button key={piece} onClick={() => setBuilt([...built, piece])}>{piece}</button>)}</div><div className="builder-actions"><button className="secondary" onClick={() => { setBuilt([]); setMessage('') }}>Đặt lại</button><button className="primary" onClick={() => setMessage(built.join('|') === correct ? '✓ Chính xác! 虽然…但是… diễn tả sự tương phản.' : 'Hãy thử xem lại vị trí của 虽然 và 但是 nhé.')}>Kiểm tra</button></div>{message && <p className="builder-message">{message}</p>}</section>
 }
 
-function ReviewPage({ words, deckLevel, setDeckLevel, rate, difficult, toggleDifficult }: { words: Vocabulary[]; deckLevel: DeckLevel; setDeckLevel: (level: DeckLevel) => void; rate: (id: string, rating: Rating) => void; difficult: string[]; toggleDifficult: (id: string) => void }) {
+function ReviewPage({ words, deckLevel, setDeckLevel, rate, difficult, toggleDifficult, speechRate, label, clearCustomQueue }: { words: Vocabulary[]; deckLevel: DeckLevel; setDeckLevel: (level: DeckLevel) => void; rate: (id: string, rating: Rating) => void; difficult: string[]; toggleDifficult: (id: string) => void; speechRate: number; label?: string; clearCustomQueue: () => void }) {
   const [sessionWords, setSessionWords] = useState(words)
   const [index, setIndex] = useState(0); const [flipped, setFlipped] = useState(false); const [finished, setFinished] = useState(false)
+  const [ratings, setRatings] = useState<Record<Rating, number>>({ again: 0, hard: 0, good: 0, easy: 0 })
   const word = sessionWords[index] ?? vocabulary[0]
   useEffect(() => {
     const keydown = (event: globalThis.KeyboardEvent) => {
@@ -645,12 +789,12 @@ function ReviewPage({ words, deckLevel, setDeckLevel, rate, difficult, toggleDif
     }
     window.addEventListener('keydown', keydown); return () => window.removeEventListener('keydown', keydown)
   })
-  const answer = (rating: Rating) => { rate(word.id, rating); if (index + 1 >= sessionWords.length) setFinished(true); else { setIndex(index + 1); setFlipped(false) } }
+  const answer = (rating: Rating) => { rate(word.id, rating); setRatings((previous) => ({ ...previous, [rating]: previous[rating] + 1 })); if (index + 1 >= sessionWords.length) setFinished(true); else { setIndex(index + 1); setFlipped(false) } }
   const deckPicker = <div className="deck-picker" aria-label="Chọn bộ flashcard">
     {deckOptions.map((deck) => <button key={deck.level} className={deckLevel === deck.level ? 'selected' : ''} onClick={() => setDeckLevel(deck.level)}>{deck.label}</button>)}
   </div>
-  if (finished) return <section className="page review-page"><div className="session-summary"><div className="celebration">✓</div><p className="eyebrow">Phiên học đã xong</p><h1>Làm tốt lắm!</h1><p>Bạn vừa xử lý {sessionWords.length} thẻ. Lịch ôn tiếp theo đã được lưu trên thiết bị này.</p><div className="summary-grid"><Stat label="Thẻ đã ôn" value={sessionWords.length} /><Stat label="Cần luyện thêm" value={0} /><Stat label="Phút tập trung" value={sessionWords.length} /></div><button className="primary" onClick={() => { setSessionWords(words); setIndex(0); setFinished(false); setFlipped(false) }}>Học thêm</button></div></section>
-  return <section className="page review-page"><div className="review-heading"><div><p className="eyebrow">Flashcards · HSK {deckLevel}</p><h1>Ôn tập tập trung</h1></div><span>{index + 1} / {sessionWords.length}</span></div>{deckPicker}<div className="review-progress"><i style={{ width: `${((index + 1) / sessionWords.length) * 100}%` }} /></div><div className={`flashcard ${flipped ? 'flipped' : ''}`} onClick={() => setFlipped(!flipped)} role="button" tabIndex={0} onKeyDown={(event: KeyboardEvent) => event.key === 'Enter' && setFlipped(!flipped)}><div className="card-face card-front"><button className="card-audio" onClick={(event) => { event.stopPropagation(); speak(word.hanzi) }}>♪</button><p className="hanzi-card">{word.hanzi}</p><p>{flipped ? '' : 'Chạm hoặc nhấn Space để xem nghĩa'}</p><button className="difficulty-toggle" onClick={(event) => { event.stopPropagation(); toggleDifficult(word.id) }}>{difficult.includes(word.id) ? '⚑ Từ khó' : '⚐ Đánh dấu khó'}</button></div><div className="card-face card-back"><p className="pinyin">{word.pinyin}</p><span className="pos-pill">{word.partOfSpeech}</span><h2>{word.meaning}</h2><hr /><p className="chinese-sentence">{word.example}</p><button className="card-sentence-audio" onClick={(event) => { event.stopPropagation(); speak(word.example) }}>♪ Nghe câu</button>{word.translation && <p>{word.translation}</p>}<p className="card-source">HSK 2.0 · HSK {word.introducedAtLevel} · Mục #{word.sourceIndex}</p></div></div>{flipped ? <div className="rating-row"><RatingButton value="again" shortcut="1" label="Quên rồi" time="10 phút" onClick={() => answer('again')} /><RatingButton value="hard" shortcut="2" label="Khó" time="12 giờ" onClick={() => answer('hard')} /><RatingButton value="good" shortcut="3" label="Nhớ được" time="1 ngày" onClick={() => answer('good')} /><RatingButton value="easy" shortcut="4" label="Rất dễ" time="3 ngày" onClick={() => answer('easy')} /></div> : <p className="keyboard-help">Space để lật thẻ · 1–4 để đánh giá sau khi lật</p>}</section>
+  if (finished) return <section className="page review-page"><div className="session-summary"><div className="celebration">✓</div><p className="eyebrow">Phiên học đã xong</p><h1>Làm tốt lắm!</h1><p>Bạn vừa xử lý {sessionWords.length} thẻ. Lịch ôn tiếp theo đã được lưu trong tiến độ của bạn.</p><div className="summary-grid"><Stat label="Thẻ đã ôn" value={sessionWords.length} /><Stat label="Cần xem lại" value={ratings.again + ratings.hard} /><Stat label="Nhớ tốt" value={ratings.good + ratings.easy} /></div><button className="primary" onClick={() => { setSessionWords(words); setIndex(0); setFinished(false); setFlipped(false); setRatings({ again: 0, hard: 0, good: 0, easy: 0 }) }}>Học thêm</button>{label && <button className="text-button" onClick={clearCustomQueue}>Quay lại nhịp ôn hằng ngày</button>}</div></section>
+  return <section className="page review-page"><div className="review-heading"><div><p className="eyebrow">{label ? `Sổ từ · ${label}` : `Flashcards · HSK ${deckLevel}`}</p><h1>Ôn tập tập trung</h1><p className="muted">{label ? `${sessionWords.length} từ trong sổ này.` : `Hôm nay có ${sessionWords.length} thẻ trong phiên này.`}</p></div><span>{index + 1} / {sessionWords.length}</span></div>{label ? <button className="text-button review-exit" onClick={clearCustomQueue}>← Về phiên ôn hằng ngày</button> : deckPicker}<div className="review-progress"><i style={{ width: `${((index + 1) / sessionWords.length) * 100}%` }} /></div><div className={`flashcard ${flipped ? 'flipped' : ''}`} onClick={() => setFlipped(!flipped)} role="button" tabIndex={0} onKeyDown={(event: KeyboardEvent) => event.key === 'Enter' && setFlipped(!flipped)}><div className="card-face card-front"><button className="card-audio" onClick={(event) => { event.stopPropagation(); speak(word.hanzi, speechRate) }}>♪</button><p className="hanzi-card">{word.hanzi}</p><p>{flipped ? '' : 'Chạm hoặc nhấn Space để xem nghĩa'}</p><button className="difficulty-toggle" onClick={(event) => { event.stopPropagation(); toggleDifficult(word.id) }}>{difficult.includes(word.id) ? '⚑ Từ khó' : '⚐ Đánh dấu khó'}</button></div><div className="card-face card-back"><p className="pinyin">{word.pinyin}</p><span className="pos-pill">{word.partOfSpeech}</span><h2>{word.meaning}</h2><hr /><p className="chinese-sentence">{word.example}</p><button className="card-sentence-audio" onClick={(event) => { event.stopPropagation(); speak(word.example, speechRate) }}>♪ Nghe câu</button>{word.translation && <p>{word.translation}</p>}<p className="card-source">HSK 2.0 · HSK {word.introducedAtLevel} · Mục #{word.sourceIndex}</p></div></div>{flipped ? <div className="rating-row"><RatingButton value="again" shortcut="1" label="Quên rồi" time="10 phút" onClick={() => answer('again')} /><RatingButton value="hard" shortcut="2" label="Khó" time="12 giờ" onClick={() => answer('hard')} /><RatingButton value="good" shortcut="3" label="Nhớ được" time="1 ngày" onClick={() => answer('good')} /><RatingButton value="easy" shortcut="4" label="Rất dễ" time="3 ngày" onClick={() => answer('easy')} /></div> : <p className="keyboard-help">Space để lật thẻ · 1–4 để đánh giá sau khi lật</p>}</section>
 }
 
 function RatingButton({ value, shortcut, label, time, onClick }: { value: Rating; shortcut: string; label: string; time: string; onClick: () => void }) { return <button className={`rating ${value}`} onClick={onClick}><kbd>{shortcut}</kbd><strong>{label}</strong><small>{time}</small></button> }
@@ -770,7 +914,7 @@ function AdminActivityPage() {
     account_registered: 'Tạo tài khoản', login: 'Đăng nhập', logout: 'Đăng xuất', page_view: 'Mở trang học',
   }
   const pageLabels: Record<string, string> = {
-    overview: 'Tổng quan', vocabulary: 'Từ vựng', grammar: 'Ngữ pháp', exercises: 'Bài tập', review: 'Ôn tập', typing: 'Luyện gõ', analytics: 'Thống kê', notebook: 'Sổ tay lỗi sai', admin: 'Quản trị',
+    overview: 'Tổng quan', vocabulary: 'Từ vựng', grammar: 'Ngữ pháp', exercises: 'Bài tập', review: 'Ôn tập', typing: 'Luyện gõ', exam: 'Luyện thi', analytics: 'Thống kê', notebook: 'Sổ tay lỗi sai', notebooks: 'Sổ từ của tôi', settings: 'Cài đặt học', admin: 'Quản trị',
   }
 
   return <section className="page admin-page">
@@ -789,6 +933,36 @@ function AnalyticsPage({ state, learned, mastered }: { state: LearningState; lea
   return <section className="page"><div className="page-heading"><div><p className="eyebrow">Dữ liệu học của bạn</p><h1>Thống kê</h1><p className="muted">Chỉ tính các hoạt động bạn đã hoàn thành trên thiết bị này.</p></div></div><div className="analytics-stats"><Stat label="Từ đã học" value={learned} /><Stat label="Từ đã ghi nhớ" value={mastered} /><Stat label="Bài tập đã làm" value={totalExercises} /><Stat label="Phút học" value={totalMinutes} /></div><div className="analytics-grid"><section className="chart-card"><div className="section-title"><div><p className="eyebrow">7 ngày gần đây</p><h2>Nhịp độ học</h2></div><span>{recentDays} ngày có hoạt động</span></div><div className="bar-chart">{days.map((day) => { const data = state.activity[todayKey(day)] ?? { cards: 0, exercises: 0, minutes: 0 }; const height = Math.min(100, data.minutes * 18); return <div key={day.toISOString()}><i style={{ height: `${height}%` }} title={`${data.minutes} phút`} /><small>{new Intl.DateTimeFormat('vi-VN', { weekday: 'short' }).format(day).replace('Th ', 'T')}</small></div> })}</div></section><section className="chart-card"><p className="eyebrow">Ôn tập</p><h2>Khả năng duy trì</h2><div className="retention"><strong>{learned ? `${Math.round((mastered / learned) * 100)}%` : '—'}</strong><span>{learned ? 'thẻ đã đạt ít nhất 3 lần ôn' : 'Hãy hoàn thành vài thẻ để xem số liệu.'}</span></div><div className="progress-track"><i style={{ width: learned ? `${(mastered / learned) * 100}%` : '0%' }} /></div></section></div><section className="chart-card heatmap-card"><div><p className="eyebrow">Lịch hoạt động</p><h2>30 ngày gần đây</h2></div><div className="heatmap">{Array.from({ length: 30 }, (_, index) => { const day = new Date(); day.setDate(day.getDate() - (29 - index)); const data = state.activity[todayKey(day)]; const intensity = Math.min(4, Math.ceil(((data?.cards ?? 0) + (data?.exercises ?? 0)) / 2)); return <i key={day.toISOString()} className={`level-${intensity}`} title={`${day.toLocaleDateString('vi-VN')}: ${(data?.cards ?? 0) + (data?.exercises ?? 0)} hoạt động`} /> })}</div></section></section>
 }
 
+function PersonalNotebooksPage({ state, update, openWord, startReview }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void; openWord: (wordId: string) => void; startReview: (wordIds: string[], label: string) => void }) {
+  const [draft, setDraft] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(state.notebooks[0]?.id ?? null)
+  const selected = state.notebooks.find((notebook) => notebook.id === selectedId) ?? null
+  useEffect(() => {
+    if (selectedId && state.notebooks.some((notebook) => notebook.id === selectedId)) return
+    setSelectedId(state.notebooks[0]?.id ?? null)
+  }, [selectedId, state.notebooks])
+  const createNotebook = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const name = draft.trim().slice(0, 48)
+    if (!name) return
+    const now = Date.now()
+    const id = globalThis.crypto?.randomUUID?.() ?? `notebook-${now}-${Math.random().toString(36).slice(2)}`
+    update((previous) => ({ ...previous, notebooks: [...previous.notebooks, { id, name, wordIds: [], createdAt: now, updatedAt: now }] }))
+    setSelectedId(id)
+    setDraft('')
+  }
+  const removeNotebook = (id: string) => update((previous) => ({ ...previous, notebooks: previous.notebooks.filter((notebook) => notebook.id !== id) }))
+  const removeWord = (notebookId: string, wordId: string) => update((previous) => ({ ...previous, notebooks: previous.notebooks.map((notebook) => notebook.id === notebookId ? { ...notebook, wordIds: notebook.wordIds.filter((id) => id !== wordId), updatedAt: Date.now() } : notebook) }))
+  const selectedWords = selected ? vocabulary.filter((word) => selected.wordIds.includes(word.id)) : []
+  return <section className="page notebook-page"><div className="page-heading"><div><p className="eyebrow">Sổ từ cá nhân</p><h1>Gom từ theo đúng mục tiêu của bạn.</h1><p className="muted">Tạo sổ theo buổi học, chủ đề hay nhóm từ thường nhầm; mỗi sổ có thể mở thẳng một phiên ôn riêng.</p></div></div><form className="notebook-create" onSubmit={createNotebook}><label>Tên sổ từ<input value={draft} onChange={(event) => setDraft(event.currentTarget.value)} placeholder="Ví dụ: Từ hay nhầm tuần này" maxLength={48} /></label><button className="primary" disabled={!draft.trim()}>Tạo sổ <span>→</span></button></form><div className="smart-collections"><button onClick={() => startReview(state.favorites, 'Từ yêu thích')} disabled={!state.favorites.length}><b>♥</b><span>Từ yêu thích</span><small>{state.favorites.length} từ</small></button><button onClick={() => startReview(state.difficult, 'Từ khó')} disabled={!state.difficult.length}><b>⚑</b><span>Từ khó</span><small>{state.difficult.length} từ</small></button></div>{state.notebooks.length ? <div className="notebooks-layout"><nav className="notebook-list" aria-label="Danh sách sổ từ">{state.notebooks.map((notebook) => <button key={notebook.id} className={notebook.id === selected?.id ? 'selected' : ''} onClick={() => setSelectedId(notebook.id)}><span>▣</span><div><b>{notebook.name}</b><small>{notebook.wordIds.length} từ</small></div></button>)}</nav>{selected && <section className="notebook-detail"><div className="notebook-detail-heading"><div><p className="eyebrow">Sổ đang mở</p><h2>{selected.name}</h2><p>{selectedWords.length ? `${selectedWords.length} từ sẵn sàng để ôn theo một phiên riêng.` : 'Lưu từ từ Thư viện để bắt đầu sổ này.'}</p></div><div><button className="primary" onClick={() => startReview(selected.wordIds, selected.name)} disabled={!selectedWords.length}>Ôn sổ này <span>→</span></button><button className="text-button danger-text" onClick={() => removeNotebook(selected.id)}>Xoá sổ</button></div></div>{selectedWords.length ? <div className="notebook-word-grid">{selectedWords.map((word) => <article key={word.id}><button className="notebook-word" onClick={() => openWord(word.id)}><span lang="zh-CN">{word.hanzi}</span><div><b>{word.meaning}</b><small>{word.pinyin}</small></div></button><button className="notebook-remove" onClick={() => removeWord(selected.id, word.id)} aria-label={`Bỏ ${word.hanzi} khỏi sổ`}>×</button></article>)}</div> : <div className="empty-state"><span>▣</span><p>Quay lại Thư viện, chọn một từ rồi thêm vào sổ này.</p></div>}</section>}</div> : <section className="empty-state large"><span>▣</span><h2>Tạo sổ đầu tiên cho nhịp học của bạn.</h2><p>Sổ từ không thay thế danh sách yêu thích hoặc từ khó; nó giúp bạn gom các từ theo mục tiêu cụ thể.</p></section>}</section>
+}
+
+function SettingsPage({ state, update }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void }) {
+  const preferences = state.preferences
+  const setPreferences = (change: Partial<LearningPreferences>) => update((previous) => ({ ...previous, preferences: { ...previous.preferences, ...change } }))
+  return <section className="page settings-page"><div className="page-heading"><div><p className="eyebrow">Không gian học</p><h1>Điều chỉnh để học lâu hơn, không mệt hơn.</h1><p className="muted">Mọi thiết lập dưới đây lưu cùng tiến độ V1 của tài khoản này.</p></div></div><div className="settings-grid"><section className="settings-card"><div><p className="eyebrow">Phát âm</p><h2>Nghe theo cách bạn muốn</h2></div><label className="switch-row"><span>Tự phát âm khi mở từ</span><input type="checkbox" checked={preferences.autoPronounce} onChange={(event) => setPreferences({ autoPronounce: event.currentTarget.checked })} /></label><label>Tốc độ đọc<select value={preferences.speechRate} onChange={(event) => setPreferences({ speechRate: Number(event.currentTarget.value) })}><option value={0.7}>Chậm · 0.7×</option><option value={0.82}>Vừa · 0.82×</option><option value={1}>Tự nhiên · 1×</option></select></label><p className="settings-note">Dùng giọng có sẵn của trình duyệt; không giả lập giọng bản ngữ khi thiết bị không cung cấp.</p></section><section className="settings-card"><div><p className="eyebrow">Hiển thị</p><h2>Tập trung vào điều bạn cần nhớ</h2></div><label className="switch-row"><span>Hiện pinyin trong gợi ý từ liên quan</span><input type="checkbox" checked={preferences.showPinyin} onChange={(event) => setPreferences({ showPinyin: event.currentTarget.checked })} /></label><label>Cỡ chữ<select value={preferences.fontScale} onChange={(event) => setPreferences({ fontScale: event.currentTarget.value as LearningPreferences['fontScale'] })}><option value="default">Tiêu chuẩn</option><option value="large">Lớn hơn</option></select></label><p className="settings-note">Chế độ tối vẫn có ở thanh bên để đổi nhanh trong lúc học.</p></section><section className="settings-card"><div><p className="eyebrow">Nhịp học</p><h2>Mục tiêu từ mới mỗi ngày</h2></div><div className="goal-options settings-goals">{[10, 15, 20].map((goal) => <button key={goal} className={state.goal === goal ? 'selected' : ''} onClick={() => update((previous) => ({ ...previous, goal }))}>{goal} từ</button>)}</div><p className="settings-note">Kế hoạch hôm nay dùng mục tiêu này và dữ liệu ôn thực tế, không tạo streak hay thời lượng giả.</p></section><section className="settings-card settings-capability"><div><p className="eyebrow">Capability của trình duyệt</p><h2>Viết và đọc</h2></div><p>Bảng viết tự do luôn hoạt động. Luyện đọc chỉ dùng transcript khi trình duyệt hỗ trợ Speech Recognition và bạn chủ động cấp quyền microphone; hiện không có chấm phát âm tự động.</p></section></div></section>
+}
+
 function Notebook({ state, setView }: { state: LearningState; setView: (view: View) => void }) {
   const entries = Object.values(state.mistakes).sort((a, b) => b.count - a.count)
   return <section className="page"><div className="page-heading"><div><p className="eyebrow">Ôn theo điểm yếu</p><h1>Sổ tay lỗi sai</h1><p className="muted">Những câu trả lời chưa đúng được lưu tự động để bạn quay lại đúng lúc.</p></div></div>{entries.length ? <div className="mistake-list">{entries.map((mistake) => { const exercise = exercises.find((item) => item.id === mistake.exerciseId); const prompt = exercise?.prompt ?? mistake.prompt ?? 'Câu hỏi từ vựng HSK 4'; const tags = exercise?.tags ?? mistake.tags ?? ['HSK 4']; const correctAnswer = exercise?.answer ?? mistake.correctAnswer; const explanation = exercise?.explanation ?? mistake.explanation ?? 'Hãy quay lại bài tập để luyện lại từ này trong các lượt tiếp theo.'; return <article key={mistake.exerciseId}><span className="mistake-number">{mistake.count}×</span><div><p className="eyebrow">{tags.join(' · ')}</p><h3>{prompt}</h3><p>Bạn chọn: <b>{mistake.answer}</b></p>{correctAnswer && <p>Đáp án: <b>{Array.isArray(correctAnswer) ? correctAnswer.join(' ') : correctAnswer}</b></p>}<small>{explanation}</small></div><button className="secondary" onClick={() => setView('exercises')}>Làm lại</button></article>})}</div> : <div className="empty-state large"><span>✓</span><h2>Chưa có lỗi nào cần xem lại</h2><p>Sau khi làm bài, các câu sai sẽ xuất hiện ở đây cùng lời giải thích.</p><button className="primary" onClick={() => setView('exercises')}>Làm bài tập</button></div>}</section>
@@ -796,6 +970,19 @@ function Notebook({ state, setView }: { state: LearningState; setView: (view: Vi
 
 function Onboarding({ state, update }: { state: LearningState; update: (recipe: (state: LearningState) => LearningState) => void }) { const [goal, setGoal] = useState(state.goal); return <div className="modal-layer"><section className="onboarding"><span className="onboarding-mark">汉</span><p className="eyebrow">Chào mừng đến với HANZI</p><h1>Học tiếng Trung, có nhịp điệu.</h1><p>Chúng ta bắt đầu với một kế hoạch nhỏ, vừa sức cho mỗi ngày.</p><label>Trình độ hiện tại<select value="HSK 4" disabled><option>HSK 4 — Có nội dung</option></select></label><fieldset><legend>Mục tiêu từ mới mỗi ngày</legend><div className="goal-options">{[10, 15, 20].map((number) => <button className={goal === number ? 'selected' : ''} onClick={() => setGoal(number)} key={number}>{number} từ</button>)}</div></fieldset><button className="primary wide" onClick={() => update((previous) => ({ ...previous, goal, onboarded: true }))}>Bắt đầu học <span>→</span></button><small>Bạn luôn có thể thay đổi nhịp học sau này.</small></section></div> }
 
-function SearchDialog({ value, setValue, close, setView }: { value: string; setValue: (value: string) => void; close: () => void; setView: (view: View) => void }) { const matching = vocabulary.filter((word) => normalized(`${word.hanzi} ${word.pinyin} ${word.meaning}`).includes(normalized(value))).slice(0, 5); return <div className="modal-layer search-layer" onMouseDown={close}><section className="search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="field-with-icon"><span>⌕</span><input autoFocus value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => event.key === 'Escape' && close()} placeholder="Tìm Hán tự, pinyin, nghĩa…" /><kbd>Esc</kbd></div>{value ? <div className="search-results">{matching.length ? matching.map((word) => <button key={word.id} onClick={() => { setView('vocabulary'); close() }}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin}</small></span></button>) : <p>Không tìm thấy kết quả.</p>}</div> : <div className="search-hint"><p>Tìm nhanh từ vựng, ngữ pháp và bài học.</p><button onClick={() => { setView('grammar'); close() }}>⌘ Xem ngữ pháp</button><button onClick={() => { setView('review'); close() }}>↻ Mở ôn tập</button></div>}</section></div> }
+function SearchDialog({ value, setValue, close, setView, recentLookups, openWord }: { value: string; setValue: (value: string) => void; close: () => void; setView: (view: View) => void; recentLookups: string[]; openWord: (wordId: string) => void }) {
+  const matching = vocabulary.filter((word) => normalized(`${word.hanzi} ${word.pinyin} ${word.meaning} ${word.topic}`).includes(normalized(value))).slice(0, 7)
+  const recentWords = recentLookups.map((id) => vocabulary.find((word) => word.id === id)).filter((word): word is Vocabulary => Boolean(word))
+  const selectWord = (wordId: string) => { openWord(wordId); close() }
+  return <div className="modal-layer search-layer" onMouseDown={close}><section className="search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="field-with-icon"><span>⌕</span><input autoFocus value={value} onChange={(event) => setValue(event.currentTarget.value)} onKeyDown={(event) => event.key === 'Escape' && close()} placeholder="Tìm Hán tự, pinyin, nghĩa hoặc chủ đề…" /><kbd>Esc</kbd></div>{value ? <div className="search-results">{matching.length ? matching.map((word) => <button key={word.id} onClick={() => selectWord(word.id)}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin} · {word.topic}</small></span></button>) : <p>Không tìm thấy kết quả trong danh mục HSK hiện có.</p>}</div> : <div className="search-hint"><p>Tìm nhanh từ vựng theo Hán tự, pinyin, nghĩa Việt hoặc chủ đề.</p>{recentWords.length ? <><p className="recent-search-title">Tra gần đây</p>{recentWords.map((word) => <button key={word.id} onClick={() => selectWord(word.id)}><span className="hanzi-small">{word.hanzi}</span><span><b>{word.meaning}</b><small>{word.pinyin}</small></span></button>)}</> : <><button onClick={() => { setView('grammar'); close() }}>⌘ Xem ngữ pháp</button><button onClick={() => { setView('review'); close() }}>↻ Mở ôn tập</button></>}</div>}</section></div>
+}
 
-function MobileNavigation({ view, setView, user }: { view: View; setView: (view: View) => void; user: AuthUser }) { const mobileNav = [...nav, ...(user.role === 'admin' ? [adminNav] : [])].filter((item) => ['overview', 'vocabulary', 'typing', 'review', 'exam', 'analytics', 'admin'].includes(item.id)); return <nav className="mobile-nav" aria-label="Điều hướng di động">{mobileNav.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => setView(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}</nav> }
+function MobileNavigation({ view, setView, user }: { view: View; setView: (view: View) => void; user: AuthUser }) {
+  const [moreOpen, setMoreOpen] = useState(false)
+  const primaryIds: View[] = ['overview', 'vocabulary', 'review', 'typing']
+  const primary = nav.filter((item) => primaryIds.includes(item.id))
+  const secondary = [...nav.filter((item) => !primaryIds.includes(item.id)), personalNav, settingsNav, ...(user.role === 'admin' ? [adminNav] : [])]
+  const choose = (nextView: View) => { setView(nextView); setMoreOpen(false) }
+  const secondaryActive = secondary.some((item) => item.id === view)
+  return <>{moreOpen && <div className="mobile-more-layer" onClick={() => setMoreOpen(false)}><section className="mobile-more-sheet" onClick={(event) => event.stopPropagation()}><div><p className="eyebrow">Tất cả khu vực</p><h2>Chọn nơi bạn muốn học</h2></div><div className="mobile-more-grid">{secondary.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => choose(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}<button className={view === 'notebook' ? 'active' : ''} onClick={() => choose('notebook')}><i>▣</i><span>Sổ tay lỗi sai</span></button></div><button className="secondary wide" onClick={() => setMoreOpen(false)}>Đóng</button></section></div>}<nav className="mobile-nav" aria-label="Điều hướng di động">{primary.map((item) => <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => choose(item.id)}><i>{item.icon}</i><span>{item.label}</span></button>)}<button className={secondaryActive || view === 'notebook' ? 'active' : ''} onClick={() => setMoreOpen(true)}><i>•••</i><span>Thêm</span></button></nav></>
+}

@@ -5,7 +5,59 @@ import { fileURLToPath } from 'node:url'
 import { createDatabasePool } from '../db/connection.js'
 import { getGrammarPoints } from '../content/grammar.js'
 import { getPracticeExercises } from '../content/practice.js'
-import { prepareV1LearningStateImport } from './v1-learning-state.js'
+import { checksumV1LearningState, prepareV1LearningStateImport } from './v1-learning-state.js'
+
+function isoTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
+/**
+ * Read-only handover status. It is safe to call before V2 tables exist and
+ * never writes or changes the V1 JSON state.
+ */
+export async function inspectV1UpgradeStatus(client, userId, { v2SchemaReady }) {
+  const sourceResult = await client.query(
+    'SELECT state, updated_at FROM learning_states WHERE user_id = $1',
+    [userId],
+  )
+  const source = sourceResult.rows[0]
+  if (!source) {
+    return {
+      v2SchemaReady,
+      v1: { exists: false, updatedAt: null, sourceChecksum: null },
+      migration: v2SchemaReady ? 'no_v1_state' : 'schema_not_ready',
+      lastImport: null,
+    }
+  }
+
+  const sourceChecksum = checksumV1LearningState(source.state)
+  const v1 = { exists: true, updatedAt: isoTimestamp(source.updated_at), sourceChecksum }
+  if (!v2SchemaReady) {
+    return { v2SchemaReady: false, v1, migration: 'schema_not_ready', lastImport: null }
+  }
+
+  const importedResult = await client.query(
+    `SELECT id, source_checksum, completed_at, report
+     FROM v1_import_runs WHERE user_id = $1
+     ORDER BY completed_at DESC LIMIT 1`,
+    [userId],
+  )
+  const imported = importedResult.rows[0]
+  if (!imported) return { v2SchemaReady: true, v1, migration: 'not_imported', lastImport: null }
+  const lastImport = {
+    id: imported.id,
+    sourceChecksum: imported.source_checksum,
+    completedAt: isoTimestamp(imported.completed_at),
+    report: typeof imported.report === 'string' ? JSON.parse(imported.report) : imported.report,
+  }
+  return {
+    v2SchemaReady: true,
+    v1,
+    migration: imported.source_checksum === sourceChecksum ? 'current' : 'stale',
+    lastImport,
+  }
+}
 
 export async function vocabularyResolver(client) {
   const result = await client.query(`
@@ -99,12 +151,22 @@ export async function importUserV1State(client, userId) {
       knownExerciseIds: new Set(exercises.map((exercise) => exercise.id)),
     })
     const previous = await client.query(
-      'SELECT id FROM v1_import_runs WHERE user_id = $1 AND source_checksum = $2',
-      [userId, plan.sourceChecksum],
+      `SELECT id, source_checksum FROM v1_import_runs
+       WHERE user_id = $1 ORDER BY completed_at DESC LIMIT 1`,
+      [userId],
     )
-    if (previous.rowCount) {
+    if (previous.rowCount && previous.rows[0].source_checksum === plan.sourceChecksum) {
       await client.query('COMMIT')
       return { status: 'already_imported', runId: previous.rows[0].id, sourceChecksum: plan.sourceChecksum }
+    }
+    if (previous.rowCount) {
+      await client.query('COMMIT')
+      return {
+        status: 'v1_state_changed_after_import',
+        runId: previous.rows[0].id,
+        importedChecksum: previous.rows[0].source_checksum,
+        sourceChecksum: plan.sourceChecksum,
+      }
     }
 
     await writePlan(client, userId, plan)
