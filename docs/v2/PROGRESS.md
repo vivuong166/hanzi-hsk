@@ -6,6 +6,8 @@
 
 > **Cập nhật 22/10/2026 — handover foundation:** API có `GET /api/v2/upgrade/status` để kiểm tra V1 snapshot theo tài khoản và chỉ cho phép V2 learning API khi đầy đủ schema event. Importer khóa trường hợp V1 đã đổi sau import để tránh merge sai. `POST /api/v2/upgrade/import-v1` còn tắt mặc định và chỉ mở bằng cấu hình sau backup/rehearsal; chưa có dữ liệu thật nào được migrate.
 
+> **Cập nhật 22/10/2026 — Dictionary foundation:** V2 có route `/dictionary` tra Hán tự, Pinyin (có/không dấu) và nghĩa Việt trong 1.200 mục HSK 2.0/2015 đã có, không gọi API ngoài. `src/content/dictionary.ts` là provider boundary để mở rộng từ dữ liệu có license về sau; phạm vi local được nêu rõ, không giả làm từ điển Trung–Việt đầy đủ. Xem `10-DICTIONARY-FOUNDATION.md`.
+
 ## 21/10/2026 — Phase 0: audit & specification
 
 ### Đã làm

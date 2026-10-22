@@ -1,14 +1,16 @@
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
 import { exercises, getGrammarById, getVocabularyById, hsk2Curriculum, listVocabulary, grammar, type CurriculumLevel, type CurriculumVocabulary, type Exercise, type GrammarPoint } from '../content/curriculum'
+import { hskLocalDictionary, lookupHskDictionary } from '../content/dictionary'
 import { ApiError, getCurrentUser, getMistakes, getV2UpgradeStatus, importV1IntoV2, register, signIn, signOut, submitPracticeAttempt, type AuthUser, type MistakeRecord, type V2ImportResult, type V2UpgradeStatus } from './api'
 import './v2.css'
 
-type RouteKey = 'today' | 'vocabulary' | 'grammar' | 'practice' | 'mistakes' | 'progress' | 'settings'
+type RouteKey = 'today' | 'vocabulary' | 'dictionary' | 'grammar' | 'practice' | 'mistakes' | 'progress' | 'settings'
 type IconName = 'home' | 'book' | 'layers' | 'sparkle' | 'chart' | 'settings' | 'search' | 'sun' | 'moon' | 'volume' | 'arrow' | 'check' | 'close' | 'menu' | 'sliders' | 'info' | 'clock' | 'chevron'
 
 const NAVIGATION: Array<{ route: RouteKey; label: string; icon: IconName; href: string }> = [
   { route: 'today', label: 'Hôm nay', icon: 'home', href: '/today' },
   { route: 'vocabulary', label: 'Học từ', icon: 'book', href: '/learn/vocabulary' },
+  { route: 'dictionary', label: 'Tra từ', icon: 'search', href: '/dictionary' },
   { route: 'grammar', label: 'Ngữ pháp', icon: 'layers', href: '/learn/grammar' },
   { route: 'practice', label: 'Luyện tập', icon: 'sparkle', href: '/practice' },
   { route: 'progress', label: 'Tiến độ', icon: 'chart', href: '/progress' },
@@ -16,6 +18,7 @@ const NAVIGATION: Array<{ route: RouteKey; label: string; icon: IconName; href: 
 
 function routeFromPath(pathname: string): RouteKey {
   if (pathname.startsWith('/learn/vocabulary')) return 'vocabulary'
+  if (pathname.startsWith('/dictionary')) return 'dictionary'
   if (pathname.startsWith('/learn/grammar')) return 'grammar'
   if (pathname.startsWith('/practice/mistakes')) return 'mistakes'
   if (pathname.startsWith('/practice')) return 'practice'
@@ -151,6 +154,7 @@ export default function V2App() {
     <main id="main-content" className="v2-main">
       {route === 'today' && <TodayPage auth={auth} />}
       {route === 'vocabulary' && <VocabularyPage pathname={pathname} speak={speak} />}
+      {route === 'dictionary' && <DictionaryPage pathname={pathname} speak={speak} />}
       {route === 'grammar' && <GrammarPage pathname={pathname} speak={speak} />}
       {route === 'practice' && <PracticePage pathname={pathname} auth={auth} />}
       {route === 'mistakes' && <MistakesPage auth={auth} />}
@@ -216,6 +220,7 @@ function TodayPage({ auth }: { auth: AuthState }) {
       <div className="v2-section-heading"><div><p className="v2-eyebrow">KHÔNG GIAN HỌC</p><h2>Bắt đầu ở nơi bạn cần.</h2></div><span>Content có sẵn</span></div>
       <div className="v2-path-grid">
         <AppLink href="/learn/vocabulary" className="v2-path-card"><span className="v2-path-icon jade"><Icon name="book" /></span><div><h3>Thư viện từ vựng</h3><p>Tìm theo Hán tự, pinyin hoặc nghĩa Việt.</p></div><Icon name="chevron" size={18} /></AppLink>
+        <AppLink href="/dictionary" className="v2-path-card"><span className="v2-path-icon amber"><Icon name="search" /></span><div><h3>Tra từ</h3><p>Tra nghĩa cục bộ theo Hán tự, pinyin hoặc tiếng Việt.</p></div><Icon name="chevron" size={18} /></AppLink>
         <AppLink href="/learn/grammar" className="v2-path-card"><span className="v2-path-icon lilac"><Icon name="layers" /></span><div><h3>Grammar Studio</h3><p>16 điểm ngữ pháp cùng ví dụ tiếng Việt.</p></div><Icon name="chevron" size={18} /></AppLink>
         <AppLink href="/practice" className="v2-path-card"><span className="v2-path-icon amber"><Icon name="sparkle" /></span><div><h3>Luyện tập mẫu</h3><p>4 câu đã biên soạn, có lời giải thích.</p></div><Icon name="chevron" size={18} /></AppLink>
       </div>
@@ -258,6 +263,35 @@ function WordDetail({ word, speak }: { word: CurriculumVocabulary; speak: (value
       <section className="v2-example-card"><p className="v2-eyebrow">VÍ DỤ</p><p lang="zh-CN">{word.example}</p>{word.translation && <p className="v2-translation">{word.translation}</p>}<button className="v2-text-button" onClick={() => speak(word.example)}><Icon name="volume" size={16} /> Nghe câu bằng giọng trình duyệt</button></section>
       <aside className="v2-provenance"><Icon name="info" size={18} /><p><strong>Nội dung có nguồn.</strong> Danh mục thuộc HSK 2.0/2015. Ví dụ và metadata tuân theo hồ sơ nguồn dữ liệu của dự án; chỉ bản dịch đã biên soạn mới được hiển thị.</p></aside>
     </article>
+  </section>
+}
+
+function DictionaryPage({ pathname, speak }: { pathname: string; speak: (value: string) => void }) {
+  const requestedQuery = new URLSearchParams(pathname.split('?')[1] ?? '').get('q') ?? ''
+  const [query, setQuery] = useState(requestedQuery)
+  useEffect(() => { setQuery(requestedQuery) }, [requestedQuery])
+  const lookup = useMemo(() => lookupHskDictionary(query), [query])
+  const searched = query.trim().length > 0
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const nextQuery = query.trim()
+    navigate(nextQuery ? `/dictionary?q=${encodeURIComponent(nextQuery)}` : '/dictionary')
+  }
+
+  return <section className="v2-page v2-dictionary-page">
+    <PageHeader eyebrow="TỪ ĐIỂN CỤC BỘ" title="Tra nghĩa, hiểu ngữ cảnh." description="Nhập Hán tự, Pinyin có hoặc không dấu, hoặc nghĩa tiếng Việt. Kết quả hiện lấy từ catalogue HSK đã có trong HANZI; không gửi từ bạn tra đến dịch vụ từ điển bên thứ ba." />
+    <section className="v2-dictionary-shell">
+      <form className="v2-dictionary-search" onSubmit={submit} role="search">
+        <label className="v2-field"><Icon name="search" size={20} /><span className="sr-only">Tra từ Hán ngữ</span><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ví dụ: 经验, jingyan, kinh nghiệm…" /></label>
+        <button className="v2-primary-button" type="submit">Tra từ <Icon name="arrow" size={17} /></button>
+      </form>
+      <aside className="v2-dictionary-provider"><span className="v2-setting-icon"><Icon name="check" size={19} /></span><div><p className="v2-eyebrow">NGUỒN ĐANG DÙNG</p><strong>{hskLocalDictionary.label}</strong><small>{hskLocalDictionary.scope} · hoạt động ngay trong ứng dụng</small></div></aside>
+      {!searched && <section className="v2-dictionary-welcome"><span lang="zh-CN">词</span><div><h2>Bắt đầu bằng một từ bạn đang gặp.</h2><p>Tra chính xác nghĩa đã biên soạn trong phạm vi HSK 1–4, nghe cách đọc và mở thẻ học tương ứng. Chưa có kết quả không có nghĩa là từ đó không tồn tại — chỉ là nó chưa thuộc từ điển HSK cục bộ.</p><div className="v2-dictionary-suggestions" aria-label="Từ gợi ý">{['你好', '学习', '经验', '谢谢'].map((suggestion) => <button key={suggestion} onClick={() => setQuery(suggestion)} lang="zh-CN">{suggestion}</button>)}</div></div></section>}
+      {searched && <section className="v2-dictionary-results" aria-live="polite">
+        <div className="v2-dictionary-results-heading"><div><p className="v2-eyebrow">KẾT QUẢ TRA TỪ</p><h2>{lookup.total ? `${lookup.total.toLocaleString('vi-VN')} mục phù hợp` : 'Chưa tìm thấy trong phạm vi HSK'}</h2></div><span>{lookup.total > lookup.results.length ? `Hiển thị ${lookup.results.length} mục đầu` : hskLocalDictionary.mode === 'local' ? 'Không dùng API ngoài' : ''}</span></div>
+        {lookup.results.length ? <div className="v2-dictionary-result-grid">{lookup.results.map(({ word, match }) => <article key={word.id} className="v2-dictionary-result"><div className="v2-dictionary-result-head"><div><p lang="zh-CN">{word.hanzi}</p><span>{word.pinyin}</span></div><span className={`v2-match-badge is-${match}`}>{match === 'exact' ? 'KHỚP CHÍNH XÁC' : match === 'prefix' ? 'BẮT ĐẦU BẰNG' : 'LIÊN QUAN'}</span></div><h3>{word.meaning}</h3><dl><div><dt>Từ loại</dt><dd>{word.partOfSpeech}</dd></div><div><dt>Trình độ</dt><dd>HSK {word.introducedAtLevel}</dd></div></dl><div className="v2-dictionary-example"><p lang="zh-CN">{word.example}</p>{word.translation && <small>{word.translation}</small>}</div><footer><button className="v2-text-button" onClick={() => speak(word.hanzi)}><Icon name="volume" size={16} /> Nghe</button><AppLink className="v2-secondary-link" href={`/learn/vocabulary/${encodeURIComponent(word.id)}`}>Mở thẻ học <Icon name="arrow" size={15} /></AppLink></footer></article>)}</div> : <section className="v2-dictionary-empty"><span><Icon name="search" size={27} /></span><h2>Chưa có mục khớp trong {hskLocalDictionary.scope}.</h2><p>Hãy thử bỏ dấu Pinyin, tra từng chữ Hán, hoặc dùng một nghĩa Việt ngắn hơn. Bản đầy đủ ngoài HSK sẽ được thêm từ nguồn có giấy phép, không bằng cách đoán nghĩa hay scrape website khác.</p></section>}
+      </section>}
+    </section>
   </section>
 }
 
@@ -412,8 +446,8 @@ function NotFoundPage({ title, description, actionHref, action }: { title: strin
 function SearchDialog({ close }: { close: () => void }) {
   const [query, setQuery] = useState('')
   const results = useMemo(() => query.trim() ? listVocabulary({ query, limit: 7 }).items : [], [query])
-  const submit = (event: FormEvent) => event.preventDefault()
-  return <div className="v2-search-layer" role="dialog" aria-modal="true" aria-label="Tìm từ vựng" onMouseDown={close}><section className="v2-search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="v2-search-dialog-top"><form className="v2-field" onSubmit={submit}><Icon name="search" size={19} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm Hán tự, pinyin, nghĩa Việt…" /><kbd>Esc</kbd></form><button className="v2-icon-button" onClick={close} aria-label="Đóng tìm kiếm"><Icon name="close" /></button></div>{!query && <p className="v2-search-hint">Nhập Hán tự, Pinyin có hoặc không dấu, hay nghĩa Việt. Kết quả mở tại địa chỉ riêng của từng mục.</p>}{query && <div className="v2-search-results">{results.length ? results.map((word) => <AppLink href={`/learn/vocabulary/${encodeURIComponent(word.id)}`} onClick={close} key={word.id}><span lang="zh-CN">{word.hanzi}</span><div><strong>{word.meaning}</strong><small>{word.pinyin} · HSK {word.introducedAtLevel}</small></div><Icon name="chevron" size={18} /></AppLink>) : <p>Không tìm thấy mục phù hợp trong danh mục HSK 2.0/2015.</p>}</div>}</section></div>
+  const submit = (event: FormEvent) => { event.preventDefault(); if (query.trim()) { navigate(`/dictionary?q=${encodeURIComponent(query.trim())}`); close() } }
+  return <div className="v2-search-layer" role="dialog" aria-modal="true" aria-label="Tìm nhanh từ vựng" onMouseDown={close}><section className="v2-search-dialog" onMouseDown={(event) => event.stopPropagation()}><div className="v2-search-dialog-top"><form className="v2-field" onSubmit={submit}><Icon name="search" size={19} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm Hán tự, pinyin, nghĩa Việt…" /><kbd>Esc</kbd></form><button className="v2-icon-button" onClick={close} aria-label="Đóng tìm kiếm"><Icon name="close" /></button></div>{!query && <p className="v2-search-hint">Nhập Hán tự, Pinyin có hoặc không dấu, hay nghĩa Việt. Enter để mở Tra từ; kết quả nhanh mở thẻ học tương ứng.</p>}{query && <div className="v2-search-results">{results.length ? results.map((word) => <AppLink href={`/learn/vocabulary/${encodeURIComponent(word.id)}`} onClick={close} key={word.id}><span lang="zh-CN">{word.hanzi}</span><div><strong>{word.meaning}</strong><small>{word.pinyin} · HSK {word.introducedAtLevel}</small></div><Icon name="chevron" size={18} /></AppLink>) : <p>Chưa thấy mục phù hợp trong danh mục HSK 2.0/2015. Nhấn Enter để xem Tra từ đầy đủ.</p>}</div>}</section></div>
 }
 
 function MobileNav({ route }: { route: RouteKey }) {

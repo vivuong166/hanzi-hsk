@@ -19,3 +19,4 @@
 | ADR-011 | 21/10/2026 | V1 import là CLI theo từng user, không auto-migrate lúc login | Bắt buộc backup/rehearsal và review `unmapped`; tránh âm thầm ghi dữ liệu không map được |
 | ADR-012 | 21/10/2026 | V1 là runtime chính trong đợt modernize UI/UX | Shell V2 chưa có feature parity nên không được thay thế V1; state và endpoint V1 được giữ nguyên |
 | ADR-013 | 22/10/2026 | V2 là upgrade kế thừa V1 theo handover gate | V1 JSON được snapshot bất biến, import idempotent và V2 không trở thành concurrent writer trước khi rehearsal/parity pass |
+| ADR-014 | 22/10/2026 | Dictionary V2 local-first, provider boundary | 1.200 mục HSK hiện có là nguồn nghĩa Việt đã kiểm soát; không leak API key, không phụ thuộc third-party endpoint hay mơ hồ license. Full dictionary chỉ được import từ release có provenance/license đã duyệt; API chỉ là enhancement server-side có nhãn. |
